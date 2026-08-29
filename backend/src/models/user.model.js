@@ -60,4 +60,127 @@ async function remove(id) {
   return result.affectedRows > 0;
 }
 
-module.exports = { findAll, findById, findByEmail, create, createUser, update, remove };
+// Dùng riêng cho đổi mật khẩu (changeMyPassword) — CẦN có password (hash) để so sánh bằng
+// bcrypt.compare, khác với findById() ở trên luôn loại bỏ cột này khỏi kết quả.
+async function findByIdWithPassword(id) {
+  const [rows] = await pool.execute('SELECT * FROM users WHERE id = ?', [id]);
+  return rows[0];
+}
+
+// Cập nhật hồ sơ cá nhân — CHỈ 3 field full_name/phone/address, không đụng email/role/password
+// (mục 6.1). Update linh hoạt: field nào không truyền (undefined) thì giữ nguyên giá trị cũ,
+// tránh trường hợp truyền thiếu field làm mất dữ liệu field khác.
+async function updateProfile(userId, { full_name, phone, address }) {
+  const fields = [];
+  const params = [];
+
+  if (full_name !== undefined) {
+    fields.push('full_name = ?');
+    params.push(full_name);
+  }
+  if (phone !== undefined) {
+    fields.push('phone = ?');
+    params.push(phone || null);
+  }
+  if (address !== undefined) {
+    fields.push('address = ?');
+    params.push(address || null);
+  }
+
+  if (fields.length === 0) return false;
+
+  params.push(userId);
+  const [result] = await pool.execute(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`, params);
+  return result.affectedRows > 0;
+}
+
+// Đổi mật khẩu — nhận sẵn hash mới (đã bcrypt.hash ở controller), model chỉ lo ghi DB.
+async function updatePassword(userId, newHashedPassword) {
+  const [result] = await pool.execute('UPDATE users SET password = ? WHERE id = ?', [newHashedPassword, userId]);
+  return result.affectedRows > 0;
+}
+
+// ===== Mục 6.11: admin quản lý khách hàng =====
+
+// keyword: LIKE trên full_name HOẶC email. status: 'active' (is_active=1) | 'locked' (is_active=0)
+// | bỏ trống = tất cả. Luôn ép role='customer' (không lẫn tài khoản admin khác vào danh sách này).
+// total_orders đếm bằng subquery tương quan (correlated subquery) thay vì JOIN + GROUP BY — đơn
+// giản hơn khi chỉ cần thêm đúng 1 cột phụ, không ảnh hưởng các cột chính đang SELECT.
+async function findAllCustomers({ keyword, status, page = 1, limit = 10 } = {}) {
+  const conditions = ["role = 'customer'"];
+  const params = [];
+
+  if (keyword && keyword.trim()) {
+    const likeKeyword = `%${keyword.trim()}%`;
+    conditions.push('(full_name LIKE ? OR email LIKE ?)');
+    params.push(likeKeyword, likeKeyword);
+  }
+  if (status === 'active') conditions.push('is_active = 1');
+  else if (status === 'locked') conditions.push('is_active = 0');
+
+  const whereSql = `WHERE ${conditions.join(' AND ')}`;
+
+  const [countRows] = await pool.query(`SELECT COUNT(*) AS total FROM users ${whereSql}`, params);
+  const total = countRows[0].total;
+
+  const safeLimit = Math.max(1, Math.min(100, parseInt(limit, 10) || 10));
+  const safePage = Math.max(1, parseInt(page, 10) || 1);
+  const offset = (safePage - 1) * safeLimit;
+
+  const [rows] = await pool.query(
+    `SELECT id, full_name, email, phone, address, is_active, created_at,
+            (SELECT COUNT(*) FROM orders o WHERE o.user_id = users.id) AS total_orders
+     FROM users
+     ${whereSql}
+     ORDER BY created_at DESC
+     LIMIT ${safeLimit} OFFSET ${offset}`,
+    params
+  );
+
+  return { items: rows, total };
+}
+
+async function findCustomerById(id) {
+  const [rows] = await pool.execute(
+    `SELECT id, full_name, email, phone, address, is_active, created_at,
+            (SELECT COUNT(*) FROM orders o WHERE o.user_id = users.id) AS total_orders
+     FROM users
+     WHERE id = ? AND role = 'customer'`,
+    [id]
+  );
+  return rows[0];
+}
+
+async function lockUser(id) {
+  const [result] = await pool.execute('UPDATE users SET is_active = 0 WHERE id = ?', [id]);
+  return result.affectedRows > 0;
+}
+
+async function unlockUser(id) {
+  const [result] = await pool.execute('UPDATE users SET is_active = 1 WHERE id = ?', [id]);
+  return result.affectedRows > 0;
+}
+
+// Dùng để kiểm tra "không cho khóa tài khoản admin" trước khi khóa (mục 6.11)
+async function findRoleById(id) {
+  const [rows] = await pool.execute('SELECT role FROM users WHERE id = ?', [id]);
+  return rows[0]?.role;
+}
+
+module.exports = {
+  findAll,
+  findById,
+  findByEmail,
+  findByIdWithPassword,
+  create,
+  createUser,
+  update,
+  updateProfile,
+  updatePassword,
+  remove,
+  findAllCustomers,
+  findCustomerById,
+  lockUser,
+  unlockUser,
+  findRoleById,
+};

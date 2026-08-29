@@ -14,8 +14,15 @@ import bookService from '../../services/book.service';
 import categoryService from '../../services/category.service';
 import authorService from '../../services/author.service';
 import publisherService from '../../services/publisher.service';
+import { useToast } from '../../composables/useToast';
+import Pagination from '../../components/common/Pagination.vue';
+import EmptyState from '../../components/common/EmptyState.vue';
+import ConfirmDialog from '../../components/common/ConfirmDialog.vue';
+import BaseButton from '../../components/common/BaseButton.vue';
 
 const PLACEHOLDER_IMAGE = 'https://placehold.co/60x80?text=No+Image';
+
+const { showToast } = useToast();
 
 const books = ref([]);
 const categories = ref([]);
@@ -52,6 +59,10 @@ const fileInputRef = ref(null);
 const imageUploading = ref(false);
 const imageError = ref('');
 
+// ----- Confirm ẩn sách / xóa ảnh -----
+const confirmHide = ref({ show: false, book: null });
+const confirmDeleteImage = ref({ show: false, image: null });
+
 async function fetchBooks(page = 1) {
   loading.value = true;
   errorMessage.value = '';
@@ -71,9 +82,11 @@ async function fetchBooks(page = 1) {
   }
 }
 
+// limit cao ở cả 3 hàm dưới: đây là dropdown chọn cho form sách, cần lấy HẾT danh mục/tác giả/NXB
+// chứ không chỉ trang đầu (các API này giờ có phân trang, mặc định chỉ trả 10 dòng).
 async function fetchCategories() {
   try {
-    const res = await categoryService.getCategories();
+    const res = await categoryService.getCategories({ limit: 100 });
     categories.value = res.data.data.items;
   } catch (err) {
     console.error('Không tải được danh mục:', err);
@@ -82,7 +95,7 @@ async function fetchCategories() {
 
 async function fetchAuthors() {
   try {
-    const res = await authorService.getAuthors();
+    const res = await authorService.getAuthors({ limit: 100 });
     authors.value = res.data.data.items;
   } catch (err) {
     console.error('Không tải được danh sách tác giả:', err);
@@ -91,7 +104,7 @@ async function fetchAuthors() {
 
 async function fetchPublishers() {
   try {
-    const res = await publisherService.getPublishers();
+    const res = await publisherService.getPublishers({ limit: 100 });
     publishers.value = res.data.data.items;
   } catch (err) {
     console.error('Không tải được danh sách nhà xuất bản:', err);
@@ -184,12 +197,14 @@ async function submitForm() {
   try {
     if (editingId.value) {
       await bookService.updateBook(editingId.value, form.value);
+      showToast('Cập nhật sách thành công');
     } else {
       // Tạo sách xong (có book_id) -> CHUYỂN SANG chế độ sửa ngay trong form đang mở,
       // để khu vực "Quản lý ảnh" hiện ra mà không cần đóng form rồi mở lại.
       const res = await bookService.createBook(form.value);
       editingId.value = res.data.data.id;
       editingStockQuantity.value = res.data.data.stock_quantity;
+      showToast('Tạo sách thành công');
     }
     await fetchBooks(pagination.value.page);
   } catch (err) {
@@ -228,8 +243,13 @@ async function uploadSelectedImages() {
   }
 }
 
-async function handleDeleteImage(img) {
-  if (!confirm('Xóa ảnh này?')) return;
+function askDeleteImage(img) {
+  confirmDeleteImage.value = { show: true, image: img };
+}
+
+async function confirmDeleteImageAction() {
+  const img = confirmDeleteImage.value.image;
+  confirmDeleteImage.value = { show: false, image: null };
   imageError.value = '';
   try {
     await bookService.deleteBookImage(editingId.value, img.id);
@@ -252,11 +272,17 @@ async function handleSetPrimary(img) {
 }
 
 // Ẩn sách thay vì xóa cứng (đúng business rule trong spec) — book vẫn còn trong DB, chỉ set is_active = 0
-async function handleHide(book) {
-  if (!confirm(`Ẩn sách "${book.title}" khỏi cửa hàng?`)) return;
+function askHide(book) {
+  confirmHide.value = { show: true, book };
+}
+
+async function confirmHideBook() {
+  const book = confirmHide.value.book;
+  confirmHide.value = { show: false, book: null };
   errorMessage.value = '';
   try {
     await bookService.deleteBook(book.id);
+    showToast('Đã ẩn sách khỏi cửa hàng');
     await fetchBooks(pagination.value.page);
   } catch (err) {
     errorMessage.value = err.response?.data?.message || 'Ẩn sách thất bại';
@@ -276,281 +302,217 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="book-manage">
+  <div>
     <h1>Quản lý sách</h1>
 
-    <div class="filters">
-      <input v-model="keyword" type="text" placeholder="Tìm theo tên sách..." @input="onKeywordInput" />
-      <select v-model="categoryId" @change="onCategoryChange">
+    <div class="mt-4 flex flex-wrap gap-3">
+      <input
+        v-model="keyword"
+        type="text"
+        placeholder="Tìm theo tên sách..."
+        class="min-h-[44px] flex-1 rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        @input="onKeywordInput"
+      />
+      <select
+        v-model="categoryId"
+        class="min-h-[44px] rounded-lg border border-border bg-surface px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        @change="onCategoryChange"
+      >
         <option value="">Tất cả danh mục</option>
         <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
       </select>
-      <button @click="openCreateForm">+ Thêm sách</button>
+      <BaseButton @click="openCreateForm">+ Thêm sách</BaseButton>
     </div>
 
-    <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+    <p v-if="errorMessage" class="mt-4 text-sm text-danger">{{ errorMessage }}</p>
 
-    <div v-if="showForm" class="form-box">
+    <div v-if="showForm" class="mt-4 max-w-lg rounded-lg bg-surface p-5 shadow-sm">
       <h3>{{ editingId ? 'Sửa sách' : 'Thêm sách' }}</h3>
 
-      <div class="form-group">
-        <label>Danh mục</label>
-        <select v-model="form.category_id">
-          <option value="" disabled>-- Chọn danh mục --</option>
-          <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Tên sách</label>
-        <input v-model="form.title" type="text" />
-      </div>
-      <div class="form-group">
-        <label>Tác giả</label>
-        <select v-model="form.author_id">
-          <option value="" disabled>-- Chọn tác giả --</option>
-          <option v-for="a in authors" :key="a.id" :value="a.id">{{ a.name }}</option>
-        </select>
-        <small>Chưa có trong danh sách? Vào "Quản lý tác giả" thêm trước.</small>
-      </div>
-      <div class="form-group">
-        <label>Nhà xuất bản</label>
-        <select v-model="form.publisher_id">
-          <option value="" disabled>-- Chọn nhà xuất bản --</option>
-          <option v-for="p in publishers" :key="p.id" :value="p.id">{{ p.name }}</option>
-        </select>
-        <small>Chưa có trong danh sách? Vào "Quản lý NXB" thêm trước.</small>
-      </div>
-      <div class="form-group">
-        <label>Mô tả</label>
-        <textarea v-model="form.description" rows="2"></textarea>
-      </div>
-      <div class="form-group">
-        <label>Giá (đ)</label>
-        <input v-model.number="form.price" type="number" min="0" />
-      </div>
-      <div v-if="editingId" class="form-group">
-        <label>Tồn kho hiện tại</label>
-        <input :value="editingStockQuantity" type="text" disabled />
-        <small>Chỉ thay đổi được qua phiếu nhập hàng, không sửa trực tiếp ở đây.</small>
-      </div>
-      <div class="form-group checkbox">
-        <label>
-          <input v-model="form.is_active" type="checkbox" :true-value="1" :false-value="0" />
+      <div class="mt-3 flex flex-col gap-3">
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Danh mục</label>
+          <select
+            v-model="form.category_id"
+            class="min-h-[44px] rounded-lg border border-border bg-surface px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          >
+            <option value="" disabled>-- Chọn danh mục --</option>
+            <option v-for="cat in categories" :key="cat.id" :value="cat.id">{{ cat.name }}</option>
+          </select>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Tên sách</label>
+          <input
+            v-model="form.title"
+            type="text"
+            class="min-h-[44px] rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Tác giả</label>
+          <select
+            v-model="form.author_id"
+            class="min-h-[44px] rounded-lg border border-border bg-surface px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          >
+            <option value="" disabled>-- Chọn tác giả --</option>
+            <option v-for="a in authors" :key="a.id" :value="a.id">{{ a.name }}</option>
+          </select>
+          <small class="text-text-secondary">Chưa có trong danh sách? Vào "Quản lý tác giả" thêm trước.</small>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Nhà xuất bản</label>
+          <select
+            v-model="form.publisher_id"
+            class="min-h-[44px] rounded-lg border border-border bg-surface px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          >
+            <option value="" disabled>-- Chọn nhà xuất bản --</option>
+            <option v-for="p in publishers" :key="p.id" :value="p.id">{{ p.name }}</option>
+          </select>
+          <small class="text-text-secondary">Chưa có trong danh sách? Vào "Quản lý NXB" thêm trước.</small>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Mô tả</label>
+          <textarea
+            v-model="form.description"
+            rows="2"
+            class="rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          ></textarea>
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Giá (đ)</label>
+          <input
+            v-model.number="form.price"
+            type="number"
+            min="0"
+            class="min-h-[44px] rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          />
+        </div>
+        <div v-if="editingId" class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Tồn kho hiện tại</label>
+          <input
+            :value="editingStockQuantity"
+            type="text"
+            disabled
+            class="min-h-[44px] rounded-lg border border-border bg-background px-3 py-2 text-[15px] text-text-secondary"
+          />
+          <small class="text-text-secondary">Chỉ thay đổi được qua phiếu nhập hàng, không sửa trực tiếp ở đây.</small>
+        </div>
+        <label class="flex min-h-[44px] items-center gap-2 text-[15px]">
+          <input v-model="form.is_active" type="checkbox" :true-value="1" :false-value="0" class="h-4 w-4 accent-primary" />
           Đang bán (bỏ tick = ẩn sách)
         </label>
       </div>
 
-      <p v-if="formError" class="error">{{ formError }}</p>
-      <div class="form-actions">
-        <button :disabled="submitting" @click="submitForm">{{ submitting ? 'Đang lưu...' : 'Lưu' }}</button>
-        <button type="button" @click="cancelForm">{{ editingId ? 'Đóng' : 'Hủy' }}</button>
+      <p v-if="formError" class="mt-3 text-sm text-danger">{{ formError }}</p>
+      <div class="mt-4 flex gap-2">
+        <BaseButton :loading="submitting" @click="submitForm">{{ submitting ? 'Đang lưu...' : 'Lưu' }}</BaseButton>
+        <BaseButton variant="secondary" type="button" @click="cancelForm">{{ editingId ? 'Đóng' : 'Hủy' }}</BaseButton>
       </div>
 
       <!-- Chỉ hiện khi đã có book_id (sách vừa tạo xong hoặc đang sửa sách có sẵn) -->
-      <div v-if="editingId" class="image-section">
-        <h4>Quản lý ảnh</h4>
+      <div v-if="editingId" class="mt-5 border-t border-border pt-4">
+        <h4 class="font-display text-base font-semibold">Quản lý ảnh</h4>
 
-        <div class="image-grid">
-          <div v-for="img in bookImages" :key="img.id" class="image-item">
-            <img :src="img.image_url" alt="Ảnh sách" />
-            <span v-if="img.is_primary" class="badge">Ảnh đại diện</span>
-            <div class="image-actions">
-              <button v-if="!img.is_primary" type="button" @click="handleSetPrimary(img)">Đặt làm đại diện</button>
-              <button type="button" @click="handleDeleteImage(img)">Xóa</button>
+        <div class="mt-2 flex flex-wrap gap-3">
+          <div v-for="img in bookImages" :key="img.id" class="relative w-[100px]">
+            <img :src="img.image_url" alt="Ảnh sách" class="h-[100px] w-[100px] rounded-lg border border-border object-cover" />
+            <span v-if="img.is_primary" class="absolute left-1 top-1 rounded bg-accent px-1.5 py-0.5 text-[10px] text-white">
+              Đại diện
+            </span>
+            <div class="mt-1 flex flex-col gap-1">
+              <button v-if="!img.is_primary" type="button" class="text-[11px] text-primary hover:underline" @click="handleSetPrimary(img)">
+                Đặt làm đại diện
+              </button>
+              <button type="button" class="text-[11px] text-danger hover:underline" @click="askDeleteImage(img)">Xóa</button>
             </div>
           </div>
-          <p v-if="bookImages.length === 0" class="no-image">Sách chưa có ảnh nào.</p>
+          <p v-if="bookImages.length === 0" class="text-sm text-text-secondary">Sách chưa có ảnh nào.</p>
         </div>
 
-        <div class="upload-box">
-          <input ref="fileInputRef" type="file" accept="image/*" multiple @change="onFilesSelected" />
-          <button type="button" :disabled="imageUploading || selectedFiles.length === 0" @click="uploadSelectedImages">
+        <div class="mt-3 flex flex-col items-start gap-2">
+          <input ref="fileInputRef" type="file" accept="image/*" multiple class="text-sm" @change="onFilesSelected" />
+          <BaseButton
+            size="sm"
+            variant="secondary"
+            type="button"
+            :loading="imageUploading"
+            :disabled="selectedFiles.length === 0"
+            @click="uploadSelectedImages"
+          >
             {{ imageUploading ? 'Đang tải lên...' : 'Tải lên' }}
-          </button>
-          <small>Tối đa 5 ảnh/lần, mỗi ảnh ≤ 5MB, định dạng JPG/PNG/WEBP.</small>
-          <p v-if="imageError" class="error">{{ imageError }}</p>
+          </BaseButton>
+          <small class="text-text-secondary">Tối đa 5 ảnh/lần, mỗi ảnh ≤ 5MB, định dạng JPG/PNG/WEBP.</small>
+          <p v-if="imageError" class="text-sm text-danger">{{ imageError }}</p>
         </div>
       </div>
     </div>
 
-    <p v-if="loading">Đang tải...</p>
+    <p v-if="loading" class="mt-4 text-sm text-text-secondary">Đang tải...</p>
     <template v-else>
-      <table>
-        <thead>
-          <tr>
-            <th>Ảnh</th>
-            <th>ID</th>
-            <th>Tên sách</th>
-            <th>Tác giả</th>
-            <th>NXB</th>
-            <th>Danh mục</th>
-            <th>Giá</th>
-            <th>Tồn kho</th>
-            <th>Trạng thái</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="book in books" :key="book.id" :class="{ inactive: !book.is_active }">
-            <td><img class="thumb" :src="book.primary_image_url || PLACEHOLDER_IMAGE" alt="" /></td>
-            <td>{{ book.id }}</td>
-            <td>{{ book.title }}</td>
-            <td>{{ book.author?.name }}</td>
-            <td>{{ book.publisher?.name }}</td>
-            <td>{{ book.category?.name }}</td>
-            <td>{{ formatPrice(book.price) }}</td>
-            <td>{{ book.stock_quantity }}</td>
-            <td>{{ book.is_active ? 'Đang bán' : 'Đã ẩn' }}</td>
-            <td>
-              <button @click="openEditForm(book)">Sửa</button>
-              <button v-if="book.is_active" @click="handleHide(book)">Ẩn</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div v-if="pagination.total_pages > 1" class="pagination">
-        <button :disabled="pagination.page <= 1" @click="goToPage(pagination.page - 1)">Trước</button>
-        <span>Trang {{ pagination.page }} / {{ pagination.total_pages }}</span>
-        <button :disabled="pagination.page >= pagination.total_pages" @click="goToPage(pagination.page + 1)">
-          Sau
-        </button>
+      <div class="mt-4 overflow-x-auto rounded-lg bg-surface shadow-sm">
+        <table class="w-full border-collapse text-sm">
+          <thead>
+            <tr class="border-b border-border bg-background text-xs uppercase text-text-secondary">
+              <th class="px-3 py-2 text-left">Ảnh</th>
+              <th class="px-3 py-2 text-left">ID</th>
+              <th class="px-3 py-2 text-left">Tên sách</th>
+              <th class="px-3 py-2 text-left">Tác giả</th>
+              <th class="px-3 py-2 text-left">NXB</th>
+              <th class="px-3 py-2 text-left">Danh mục</th>
+              <th class="px-3 py-2 text-left">Giá</th>
+              <th class="px-3 py-2 text-left">Tồn kho</th>
+              <th class="px-3 py-2 text-left">Trạng thái</th>
+              <th class="px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="book in books"
+              :key="book.id"
+              class="border-b border-border hover:bg-background"
+              :class="{ 'opacity-50': !book.is_active }"
+            >
+              <td class="px-3 py-2">
+                <img class="h-[56px] w-[40px] rounded object-cover" :src="book.primary_image_url || PLACEHOLDER_IMAGE" :alt="book.title" />
+              </td>
+              <td class="px-3 py-2">{{ book.id }}</td>
+              <td class="px-3 py-2">{{ book.title }}</td>
+              <td class="px-3 py-2">{{ book.author?.name }}</td>
+              <td class="px-3 py-2">{{ book.publisher?.name }}</td>
+              <td class="px-3 py-2">{{ book.category?.name }}</td>
+              <td class="px-3 py-2">{{ formatPrice(book.price) }}</td>
+              <td class="px-3 py-2">{{ book.stock_quantity }}</td>
+              <td class="px-3 py-2">{{ book.is_active ? 'Đang bán' : 'Đã ẩn' }}</td>
+              <td class="px-3 py-2">
+                <div class="flex gap-3">
+                  <button type="button" class="text-primary hover:underline" @click="openEditForm(book)">Sửa</button>
+                  <button v-if="book.is_active" type="button" class="text-danger hover:underline" @click="askHide(book)">Ẩn</button>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <EmptyState v-if="books.length === 0" icon="📖" title="Không tìm thấy sách nào" />
       </div>
+
+      <Pagination :current-page="pagination.page" :total-pages="pagination.total_pages" @change-page="goToPage" />
     </template>
+
+    <ConfirmDialog
+      :show="confirmHide.show"
+      title="Ẩn sách"
+      :message="`Ẩn sách “${confirmHide.book?.title}” khỏi cửa hàng?`"
+      confirm-label="Ẩn"
+      @confirm="confirmHideBook"
+      @cancel="confirmHide.show = false"
+    />
+    <ConfirmDialog
+      :show="confirmDeleteImage.show"
+      title="Xóa ảnh"
+      message="Xóa ảnh này khỏi sách?"
+      confirm-label="Xóa"
+      @confirm="confirmDeleteImageAction"
+      @cancel="confirmDeleteImage.show = false"
+    />
   </div>
 </template>
-
-<style scoped>
-.book-manage {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 16px;
-}
-.filters {
-  display: flex;
-  gap: 12px;
-  margin-bottom: 16px;
-}
-.filters input {
-  flex: 1;
-  padding: 8px;
-}
-.filters select {
-  padding: 8px;
-}
-.form-box {
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  padding: 16px;
-  margin-bottom: 16px;
-  max-width: 480px;
-}
-.form-group {
-  margin-bottom: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.form-group.checkbox {
-  flex-direction: row;
-  align-items: center;
-}
-.form-group small {
-  color: #888;
-  font-size: 12px;
-}
-.form-actions {
-  display: flex;
-  gap: 8px;
-}
-.image-section {
-  margin-top: 20px;
-  padding-top: 16px;
-  border-top: 1px solid #ddd;
-}
-.image-section h4 {
-  margin-bottom: 10px;
-}
-.image-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.image-item {
-  position: relative;
-  width: 100px;
-}
-.image-item img {
-  width: 100px;
-  height: 100px;
-  object-fit: cover;
-  border-radius: 4px;
-  border: 1px solid #ddd;
-}
-.badge {
-  position: absolute;
-  top: 4px;
-  left: 4px;
-  background: #d33;
-  color: #fff;
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 3px;
-}
-.image-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 4px;
-}
-.image-actions button {
-  font-size: 11px;
-  padding: 3px;
-  margin-right: 0;
-}
-.no-image {
-  color: #888;
-  font-size: 13px;
-}
-.upload-box {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-}
-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-th,
-td {
-  border: 1px solid #ddd;
-  padding: 8px;
-  text-align: left;
-  font-size: 14px;
-}
-.thumb {
-  width: 40px;
-  height: 56px;
-  object-fit: cover;
-  border-radius: 3px;
-}
-tr.inactive {
-  opacity: 0.5;
-}
-button {
-  cursor: pointer;
-  margin-right: 4px;
-}
-.pagination {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  margin-top: 16px;
-}
-.error {
-  color: #d33;
-}
-</style>

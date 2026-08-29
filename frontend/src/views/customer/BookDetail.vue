@@ -1,18 +1,27 @@
 <script setup>
-// Chi tiết 1 cuốn sách. Nút "Thêm vào giỏ" tạm thời chỉ alert() — nối vào cart store thật sẽ làm ở bước sau.
+// Chi tiết 1 cuốn sách. Nút "Thêm vào giỏ" nối vào cart.store.addItem() thật (mục 6.6).
 import { ref, onMounted } from 'vue';
-import { useRoute } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import bookService from '../../services/book.service';
+import { useCartStore } from '../../stores/cart.store';
+import { useAuthStore } from '../../stores/auth.store';
+import BaseButton from '../../components/common/BaseButton.vue';
 
 const PLACEHOLDER_IMAGE = 'https://placehold.co/300x420?text=No+Image';
 
 const route = useRoute();
+const router = useRouter();
+const cartStore = useCartStore();
+const authStore = useAuthStore();
 
 const book = ref(null);
 const quantity = ref(1);
 const loading = ref(true);
 const errorMessage = ref('');
 const selectedImageUrl = ref(''); // ảnh đang hiển thị to ở gallery, đổi khi bấm vào thumbnail
+const addingToCart = ref(false);
+const cartMessage = ref('');
+const cartMessageIsError = ref(false);
 
 async function fetchBook() {
   loading.value = true;
@@ -37,127 +46,83 @@ function formatPrice(price) {
   return Number(price).toLocaleString('vi-VN') + 'đ';
 }
 
-function addToCart() {
-  // TODO: nối vào cart store thật ở bước code module Cart
-  alert(`Đã thêm ${quantity.value} cuốn "${book.value.title}" vào giỏ (demo, chưa lưu thật)`);
+async function addToCart() {
+  // Chưa đăng nhập -> đưa sang trang login luôn thay vì để API trả lỗi 401 khó hiểu
+  if (!authStore.isLoggedIn) {
+    router.push('/login');
+    return;
+  }
+
+  addingToCart.value = true;
+  cartMessage.value = '';
+  const result = await cartStore.addItem(book.value.id, quantity.value);
+  if (result.success) {
+    cartMessageIsError.value = false;
+    cartMessage.value = `Đã thêm ${quantity.value} cuốn "${book.value.title}" vào giỏ hàng`;
+  } else {
+    cartMessageIsError.value = true;
+    cartMessage.value = result.message;
+  }
+  addingToCart.value = false;
+  setTimeout(() => (cartMessage.value = ''), 4000);
 }
 
 onMounted(fetchBook);
 </script>
 
 <template>
-  <div class="detail-page">
-    <p v-if="loading">Đang tải...</p>
-    <p v-else-if="errorMessage" class="error">{{ errorMessage }}</p>
+  <div class="mx-auto max-w-4xl px-4 py-8">
+    <p v-if="loading" class="text-text-secondary">Đang tải...</p>
+    <p v-else-if="errorMessage" class="text-danger">{{ errorMessage }}</p>
 
-    <div v-else-if="book" class="detail-content">
-      <div class="gallery">
-        <img class="main-image" :src="selectedImageUrl || PLACEHOLDER_IMAGE" :alt="book.title" />
+    <div v-else-if="book" class="flex flex-col gap-6 md:flex-row">
+      <div class="shrink-0 md:w-64">
+        <img
+          class="aspect-[3/4] w-full rounded-lg border border-border object-cover"
+          :src="selectedImageUrl || PLACEHOLDER_IMAGE"
+          :alt="book.title"
+        />
 
-        <div v-if="book.images && book.images.length > 1" class="thumbnails">
+        <div v-if="book.images && book.images.length > 1" class="mt-2 flex gap-2 overflow-x-auto">
           <img
             v-for="img in book.images"
             :key="img.id"
             :src="img.image_url"
-            :class="{ active: img.image_url === selectedImageUrl }"
+            :alt="book.title"
+            class="h-14 w-14 shrink-0 cursor-pointer rounded-lg border-2 object-cover opacity-70 hover:opacity-100"
+            :class="img.image_url === selectedImageUrl ? 'border-accent opacity-100' : 'border-transparent'"
             @click="selectedImageUrl = img.image_url"
           />
         </div>
       </div>
 
-      <div class="info">
+      <div class="flex-1">
         <h1>{{ book.title }}</h1>
-        <p><strong>Tác giả:</strong> {{ book.author?.name || 'Đang cập nhật' }}</p>
-        <p><strong>Nhà xuất bản:</strong> {{ book.publisher?.name || 'Đang cập nhật' }}</p>
-        <p><strong>Danh mục:</strong> {{ book.category?.name }}</p>
-        <p class="price">{{ formatPrice(book.price) }}</p>
-        <p><strong>Tồn kho:</strong> {{ book.stock_quantity }}</p>
-        <p class="description">{{ book.description || 'Chưa có mô tả' }}</p>
+        <p class="mt-2 text-[15px]"><strong>Tác giả:</strong> {{ book.author?.name || 'Đang cập nhật' }}</p>
+        <p class="text-[15px]"><strong>Nhà xuất bản:</strong> {{ book.publisher?.name || 'Đang cập nhật' }}</p>
+        <p class="text-[15px]"><strong>Danh mục:</strong> {{ book.category?.name }}</p>
+        <p class="mt-2 text-2xl font-semibold text-accent">{{ formatPrice(book.price) }}</p>
+        <p class="mt-1 text-[15px]"><strong>Tồn kho:</strong> {{ book.stock_quantity }}</p>
+        <p class="mt-3 whitespace-pre-line text-[15px] text-text-secondary">{{ book.description || 'Chưa có mô tả' }}</p>
 
-        <div class="add-to-cart">
+        <div class="mt-4 flex items-center gap-3">
+          <label for="quantity" class="sr-only">Số lượng</label>
           <input
+            id="quantity"
             v-model.number="quantity"
             type="number"
             min="1"
             :max="book.stock_quantity"
+            class="min-h-[44px] w-20 rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
           />
-          <button :disabled="book.stock_quantity <= 0" @click="addToCart">
+          <BaseButton :disabled="book.stock_quantity <= 0" :loading="addingToCart" @click="addToCart">
             {{ book.stock_quantity <= 0 ? 'Hết hàng' : 'Thêm vào giỏ' }}
-          </button>
+          </BaseButton>
         </div>
+        <p v-if="cartMessage" class="mt-2 text-sm" :class="cartMessageIsError ? 'text-danger' : 'text-success'">
+          {{ cartMessage }}
+        </p>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.detail-page {
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 16px;
-}
-.detail-content {
-  display: flex;
-  gap: 24px;
-}
-.gallery {
-  width: 260px;
-}
-.main-image {
-  width: 260px;
-  height: 360px;
-  object-fit: cover;
-  border-radius: 6px;
-  display: block;
-}
-.thumbnails {
-  display: flex;
-  gap: 8px;
-  margin-top: 8px;
-  overflow-x: auto;
-}
-.thumbnails img {
-  width: 56px;
-  height: 56px;
-  object-fit: cover;
-  border-radius: 4px;
-  cursor: pointer;
-  border: 2px solid transparent;
-  opacity: 0.7;
-}
-.thumbnails img:hover {
-  opacity: 1;
-}
-.thumbnails img.active {
-  border-color: #d33;
-  opacity: 1;
-}
-.info {
-  flex: 1;
-}
-.price {
-  font-size: 20px;
-  font-weight: bold;
-  color: #d33;
-}
-.description {
-  white-space: pre-line;
-  color: #444;
-}
-.add-to-cart {
-  display: flex;
-  gap: 12px;
-  margin-top: 16px;
-}
-.add-to-cart input {
-  width: 60px;
-  padding: 6px;
-}
-.add-to-cart button {
-  padding: 8px 16px;
-  cursor: pointer;
-}
-.error {
-  color: #d33;
-}
-</style>

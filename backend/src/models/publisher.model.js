@@ -1,9 +1,31 @@
 // Model cho bảng publishers (nhà xuất bản). Cùng cấu trúc với author.model.js.
 const pool = require('../config/db');
 
-async function findAll() {
-  const [rows] = await pool.execute('SELECT * FROM publishers ORDER BY id ASC');
-  return rows;
+// { keyword, page, limit } -> { items, total } — theo đúng quy ước phân trang chung mục 5.
+async function findAll({ keyword, page = 1, limit = 10 } = {}) {
+  const conditions = [];
+  const params = [];
+
+  if (keyword && keyword.trim()) {
+    conditions.push('name LIKE ?');
+    params.push(`%${keyword.trim()}%`);
+  }
+
+  const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const [countRows] = await pool.query(`SELECT COUNT(*) AS total FROM publishers ${whereSql}`, params);
+  const total = countRows[0].total;
+
+  const safeLimit = Math.max(1, Math.min(100, parseInt(limit, 10) || 10));
+  const safePage = Math.max(1, parseInt(page, 10) || 1);
+  const offset = (safePage - 1) * safeLimit;
+
+  const [rows] = await pool.query(
+    `SELECT * FROM publishers ${whereSql} ORDER BY id ASC LIMIT ${safeLimit} OFFSET ${offset}`,
+    params
+  );
+
+  return { items: rows, total };
 }
 
 async function findById(id) {

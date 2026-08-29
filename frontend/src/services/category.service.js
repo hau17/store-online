@@ -2,8 +2,9 @@
 import api from './api';
 
 export default {
-  getCategories() {
-    return api.get('/categories');
+  // params: { keyword, page, limit }
+  getCategories(params) {
+    return api.get('/categories', { params });
   },
   getCategoryById(id) {
     return api.get(`/categories/${id}`);

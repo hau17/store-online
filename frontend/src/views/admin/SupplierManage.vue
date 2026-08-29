@@ -1,11 +1,22 @@
 <script setup>
-// Quản lý nhà cung cấp: cùng khuôn mẫu với CategoryManage.vue. Toàn bộ API này chỉ admin gọi được.
+// Quản lý nhà cung cấp: cùng khuôn mẫu với CategoryManage.vue (tìm kiếm + phân trang).
+// Toàn bộ API này chỉ admin gọi được.
 import { ref, onMounted } from 'vue';
 import supplierService from '../../services/supplier.service';
+import { useToast } from '../../composables/useToast';
+import Pagination from '../../components/common/Pagination.vue';
+import BaseButton from '../../components/common/BaseButton.vue';
+import ConfirmDialog from '../../components/common/ConfirmDialog.vue';
+
+const { showToast } = useToast();
 
 const suppliers = ref([]);
+const pagination = ref({ page: 1, limit: 10, total: 0, total_pages: 0 });
 const loading = ref(true);
 const errorMessage = ref('');
+
+const keyword = ref('');
+let debounceTimer = null;
 
 const showForm = ref(false);
 const editingId = ref(null);
@@ -13,17 +24,29 @@ const form = ref({ name: '', phone: '', email: '', address: '' });
 const formError = ref('');
 const submitting = ref(false);
 
-async function fetchSuppliers() {
+const confirmDelete = ref({ show: false, supplier: null });
+
+async function fetchSuppliers(page = 1) {
   loading.value = true;
   errorMessage.value = '';
   try {
-    const res = await supplierService.getSuppliers();
+    const res = await supplierService.getSuppliers({ keyword: keyword.value || undefined, page, limit: 10 });
     suppliers.value = res.data.data.items;
+    pagination.value = res.data.data.pagination;
   } catch (err) {
     errorMessage.value = err.response?.data?.message || 'Không tải được danh sách nhà cung cấp';
   } finally {
     loading.value = false;
   }
+}
+
+function onKeywordInput() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => fetchSuppliers(1), 400);
+}
+
+function goToPage(page) {
+  fetchSuppliers(page);
 }
 
 function openCreateForm() {
@@ -60,11 +83,13 @@ async function submitForm() {
   try {
     if (editingId.value) {
       await supplierService.updateSupplier(editingId.value, form.value);
+      showToast('Cập nhật nhà cung cấp thành công');
     } else {
       await supplierService.createSupplier(form.value);
+      showToast('Thêm nhà cung cấp thành công');
     }
     showForm.value = false;
-    await fetchSuppliers();
+    await fetchSuppliers(pagination.value.page);
   } catch (err) {
     formError.value = err.response?.data?.message || 'Lưu nhà cung cấp thất bại';
   } finally {
@@ -72,123 +97,132 @@ async function submitForm() {
   }
 }
 
-async function handleDelete(supplier) {
-  if (!confirm(`Xóa nhà cung cấp "${supplier.name}"?`)) return;
+function askDelete(supplier) {
+  confirmDelete.value = { show: true, supplier };
+}
+
+async function confirmDeleteSupplier() {
+  const supplier = confirmDelete.value.supplier;
+  confirmDelete.value = { show: false, supplier: null };
   errorMessage.value = '';
   try {
     await supplierService.deleteSupplier(supplier.id);
-    await fetchSuppliers();
+    showToast('Đã xóa nhà cung cấp');
+    await fetchSuppliers(pagination.value.page);
   } catch (err) {
     // Trường hợp phổ biến nhất: 409 SUPPLIER_HAS_IMPORTS (còn phiếu nhập tham chiếu, không cho xóa)
     errorMessage.value = err.response?.data?.message || 'Xóa nhà cung cấp thất bại';
   }
 }
 
-onMounted(fetchSuppliers);
+onMounted(() => fetchSuppliers(1));
 </script>
 
 <template>
-  <div class="supplier-manage">
+  <div>
     <h1>Quản lý nhà cung cấp</h1>
 
-    <button @click="openCreateForm">+ Thêm nhà cung cấp</button>
+    <div class="mt-4 flex flex-wrap gap-3">
+      <input
+        v-model="keyword"
+        type="text"
+        placeholder="Tìm theo tên nhà cung cấp..."
+        class="min-h-[44px] flex-1 rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        @input="onKeywordInput"
+      />
+      <BaseButton @click="openCreateForm">+ Thêm nhà cung cấp</BaseButton>
+    </div>
 
-    <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+    <p v-if="errorMessage" class="mt-4 text-sm text-danger">{{ errorMessage }}</p>
 
-    <div v-if="showForm" class="form-box">
+    <div v-if="showForm" class="mt-4 max-w-md rounded-lg bg-surface p-5 shadow-sm">
       <h3>{{ editingId ? 'Sửa nhà cung cấp' : 'Thêm nhà cung cấp' }}</h3>
-      <div class="form-group">
-        <label>Tên</label>
-        <input v-model="form.name" type="text" />
+      <div class="mt-3 flex flex-col gap-3">
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Tên</label>
+          <input
+            v-model="form.name"
+            type="text"
+            class="min-h-[44px] rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Số điện thoại</label>
+          <input
+            v-model="form.phone"
+            type="text"
+            class="min-h-[44px] rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Email</label>
+          <input
+            v-model="form.email"
+            type="email"
+            class="min-h-[44px] rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Địa chỉ</label>
+          <input
+            v-model="form.address"
+            type="text"
+            class="min-h-[44px] rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          />
+        </div>
       </div>
-      <div class="form-group">
-        <label>Số điện thoại</label>
-        <input v-model="form.phone" type="text" />
-      </div>
-      <div class="form-group">
-        <label>Email</label>
-        <input v-model="form.email" type="email" />
-      </div>
-      <div class="form-group">
-        <label>Địa chỉ</label>
-        <input v-model="form.address" type="text" />
-      </div>
-      <p v-if="formError" class="error">{{ formError }}</p>
-      <div class="form-actions">
-        <button :disabled="submitting" @click="submitForm">{{ submitting ? 'Đang lưu...' : 'Lưu' }}</button>
-        <button type="button" @click="cancelForm">Hủy</button>
+      <p v-if="formError" class="mt-3 text-sm text-danger">{{ formError }}</p>
+      <div class="mt-4 flex gap-2">
+        <BaseButton :loading="submitting" @click="submitForm">{{ submitting ? 'Đang lưu...' : 'Lưu' }}</BaseButton>
+        <BaseButton variant="secondary" type="button" @click="cancelForm">Hủy</BaseButton>
       </div>
     </div>
 
-    <p v-if="loading">Đang tải...</p>
-    <table v-else>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Tên</th>
-          <th>SĐT</th>
-          <th>Email</th>
-          <th>Địa chỉ</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="supplier in suppliers" :key="supplier.id">
-          <td>{{ supplier.id }}</td>
-          <td>{{ supplier.name }}</td>
-          <td>{{ supplier.phone }}</td>
-          <td>{{ supplier.email }}</td>
-          <td>{{ supplier.address }}</td>
-          <td>
-            <button @click="openEditForm(supplier)">Sửa</button>
-            <button @click="handleDelete(supplier)">Xóa</button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
+    <p v-if="loading" class="mt-4 text-sm text-text-secondary">Đang tải...</p>
+    <template v-else>
+      <div class="mt-4 overflow-x-auto rounded-lg bg-surface shadow-sm">
+        <table class="w-full border-collapse text-sm">
+          <thead>
+            <tr class="border-b border-border bg-background text-xs uppercase text-text-secondary">
+              <th class="px-3 py-2 text-left">ID</th>
+              <th class="px-3 py-2 text-left">Tên</th>
+              <th class="px-3 py-2 text-left">SĐT</th>
+              <th class="px-3 py-2 text-left">Email</th>
+              <th class="px-3 py-2 text-left">Địa chỉ</th>
+              <th class="px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="supplier in suppliers" :key="supplier.id" class="border-b border-border hover:bg-background">
+              <td class="px-3 py-2">{{ supplier.id }}</td>
+              <td class="px-3 py-2">{{ supplier.name }}</td>
+              <td class="px-3 py-2">{{ supplier.phone }}</td>
+              <td class="px-3 py-2">{{ supplier.email }}</td>
+              <td class="px-3 py-2">{{ supplier.address }}</td>
+              <td class="px-3 py-2">
+                <div class="flex gap-3">
+                  <button type="button" class="text-primary hover:underline" @click="openEditForm(supplier)">Sửa</button>
+                  <button type="button" class="text-danger hover:underline" @click="askDelete(supplier)">Xóa</button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="suppliers.length === 0">
+              <td colspan="6" class="px-3 py-6 text-center text-text-secondary">Không tìm thấy nhà cung cấp nào.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <Pagination :current-page="pagination.page" :total-pages="pagination.total_pages" @change-page="goToPage" />
+    </template>
+
+    <ConfirmDialog
+      :show="confirmDelete.show"
+      title="Xóa nhà cung cấp"
+      :message="`Xóa nhà cung cấp “${confirmDelete.supplier?.name}”?`"
+      confirm-label="Xóa"
+      @confirm="confirmDeleteSupplier"
+      @cancel="confirmDelete.show = false"
+    />
   </div>
 </template>
-
-<style scoped>
-.supplier-manage {
-  max-width: 900px;
-  margin: 0 auto;
-  padding: 16px;
-}
-.form-box {
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  padding: 16px;
-  margin: 16px 0;
-  max-width: 400px;
-}
-.form-group {
-  margin-bottom: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.form-actions {
-  display: flex;
-  gap: 8px;
-}
-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 16px;
-}
-th,
-td {
-  border: 1px solid #ddd;
-  padding: 8px;
-  text-align: left;
-  font-size: 14px;
-}
-button {
-  cursor: pointer;
-  margin-right: 4px;
-}
-.error {
-  color: #d33;
-}
-</style>

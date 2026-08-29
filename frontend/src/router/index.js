@@ -8,7 +8,9 @@ import Home from '../views/customer/Home.vue';
 import BookDetail from '../views/customer/BookDetail.vue';
 import Cart from '../views/customer/Cart.vue';
 import Checkout from '../views/customer/Checkout.vue';
+import OrderList from '../views/customer/OrderList.vue';
 import OrderStatus from '../views/customer/OrderStatus.vue';
+import Account from '../views/customer/Account.vue';
 import Login from '../views/customer/Login.vue';
 import Register from '../views/customer/Register.vue';
 
@@ -21,6 +23,8 @@ import PublisherManage from '../views/admin/PublisherManage.vue';
 import SupplierManage from '../views/admin/SupplierManage.vue';
 import StockImportManage from '../views/admin/StockImportManage.vue';
 import OrderManage from '../views/admin/OrderManage.vue';
+import CustomerManage from '../views/admin/CustomerManage.vue';
+import AdminAccount from '../views/admin/Account.vue';
 
 const routes = [
   // Customer
@@ -29,7 +33,9 @@ const routes = [
   // requiresAuth: cần đăng nhập (customer hoặc admin đều được), khác với requiresAdmin ở dưới
   { path: '/cart', name: 'cart', component: Cart, meta: { requiresAuth: true } },
   { path: '/checkout', name: 'checkout', component: Checkout, meta: { requiresAuth: true } },
+  { path: '/orders', name: 'order-list', component: OrderList, meta: { requiresAuth: true } },
   { path: '/orders/:id', name: 'order-status', component: OrderStatus, meta: { requiresAuth: true } },
+  { path: '/account', name: 'account', component: Account, meta: { requiresAuth: true } },
   { path: '/login', name: 'login', component: Login },
   { path: '/register', name: 'register', component: Register },
 
@@ -47,6 +53,8 @@ const routes = [
     meta: { requiresAdmin: true },
   },
   { path: '/admin/orders', name: 'admin-orders', component: OrderManage, meta: { requiresAdmin: true } },
+  { path: '/admin/customers', name: 'admin-customers', component: CustomerManage, meta: { requiresAdmin: true } },
+  { path: '/admin/account', name: 'admin-account', component: AdminAccount, meta: { requiresAdmin: true } },
 ];
 
 const router = createRouter({

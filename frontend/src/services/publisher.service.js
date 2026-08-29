@@ -2,8 +2,9 @@
 import api from './api';
 
 export default {
-  getPublishers() {
-    return api.get('/publishers');
+  // params: { keyword, page, limit }
+  getPublishers(params) {
+    return api.get('/publishers', { params });
   },
   getPublisherById(id) {
     return api.get(`/publishers/${id}`);

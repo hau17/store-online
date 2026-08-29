@@ -1,42 +1,44 @@
 <script setup>
-// Trang tổng quan admin: chỉ làm nơi điều hướng nhanh tới các trang quản trị, chưa cần thống kê số liệu.
+// Trang tổng quan admin: vài card thống kê cơ bản (đếm từ pagination.total của các API đã có sẵn,
+// không tạo API thống kê riêng vì spec chưa yêu cầu). Điều hướng chi tiết dùng sidebar (AdminLayout.vue).
+import { ref, onMounted } from 'vue';
+import bookService from '../../services/book.service';
+import orderService from '../../services/order.service';
+import userService from '../../services/user.service';
+
+const stats = ref({ books: null, orders: null, customers: null });
+
+async function loadStats() {
+  const [booksRes, ordersRes, customersRes] = await Promise.allSettled([
+    bookService.getBooks({ page: 1, limit: 1 }),
+    orderService.getOrders({ all: true, page: 1, limit: 1 }),
+    userService.getCustomers({ page: 1, limit: 1 }),
+  ]);
+  if (booksRes.status === 'fulfilled') stats.value.books = booksRes.value.data.data.pagination.total;
+  if (ordersRes.status === 'fulfilled') stats.value.orders = ordersRes.value.data.data.pagination.total;
+  if (customersRes.status === 'fulfilled') stats.value.customers = customersRes.value.data.data.pagination.total;
+}
+
+onMounted(loadStats);
 </script>
 
 <template>
-  <div class="dashboard">
-    <h1>Admin Dashboard</h1>
-    <nav class="admin-nav">
-      <router-link to="/admin/categories">Quản lý danh mục</router-link>
-      <router-link to="/admin/authors">Quản lý tác giả</router-link>
-      <router-link to="/admin/publishers">Quản lý nhà xuất bản</router-link>
-      <router-link to="/admin/books">Quản lý sách</router-link>
-      <router-link to="/admin/suppliers">Quản lý nhà cung cấp</router-link>
-      <router-link to="/admin/stock-imports">Quản lý nhập hàng</router-link>
-      <router-link to="/admin/orders">Quản lý đơn hàng</router-link>
-    </nav>
+  <div>
+    <h1>Tổng quan</h1>
+
+    <div class="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-3">
+      <div class="rounded-lg bg-surface p-5 shadow-sm">
+        <p class="text-sm text-text-secondary">Tổng số sách</p>
+        <p class="mt-1 font-display text-2xl font-semibold text-primary">{{ stats.books ?? '—' }}</p>
+      </div>
+      <div class="rounded-lg bg-surface p-5 shadow-sm">
+        <p class="text-sm text-text-secondary">Tổng số đơn hàng</p>
+        <p class="mt-1 font-display text-2xl font-semibold text-primary">{{ stats.orders ?? '—' }}</p>
+      </div>
+      <div class="rounded-lg bg-surface p-5 shadow-sm">
+        <p class="text-sm text-text-secondary">Tổng số khách hàng</p>
+        <p class="mt-1 font-display text-2xl font-semibold text-primary">{{ stats.customers ?? '—' }}</p>
+      </div>
+    </div>
   </div>
 </template>
-
-<style scoped>
-.dashboard {
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 16px;
-}
-.admin-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 16px;
-}
-.admin-nav a {
-  padding: 10px 14px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  text-decoration: none;
-  color: #222;
-}
-.admin-nav a:hover {
-  background: #f5f5f5;
-}
-</style>

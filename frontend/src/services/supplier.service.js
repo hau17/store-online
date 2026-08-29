@@ -2,8 +2,9 @@
 import api from './api';
 
 export default {
-  getSuppliers() {
-    return api.get('/suppliers');
+  // params: { keyword, page, limit }
+  getSuppliers(params) {
+    return api.get('/suppliers', { params });
   },
   getSupplierById(id) {
     return api.get(`/suppliers/${id}`);

@@ -12,6 +12,8 @@
 | Database | MySQL 8 |
 | ORM/Query | mysql2 (raw query) hoặc Sequelize (chọn 1, khuyến nghị Sequelize cho người mới) |
 | Frontend | Vue 3 (Composition API) + Vue Router + Pinia (state management) |
+| CSS | Tailwind CSS (utility-first, cấu hình theo mục 10 để đồng bộ toàn bộ giao diện) |
+| Font | Google Fonts: `Lora` (tiêu đề) + `Be Vietnam Pro` (nội dung, hỗ trợ dấu tiếng Việt tốt) |
 | Auth | JWT (jsonwebtoken) + bcrypt (hash password) |
 | Realtime | Socket.io (thông báo trạng thái đơn hàng) |
 | Thanh toán | SePay (webhook xác nhận chuyển khoản tự động) |
@@ -45,7 +47,8 @@ project-root/
 │   │   │   ├── stockImportItem.model.js
 │   │   │   └── bookImage.model.js     # MỚI: quản lý ảnh sách (nhiều ảnh/1 sách)
 │   │   ├── controllers/
-│   │   │   ├── auth.controller.js
+│   │   │   ├── auth.controller.js     # bao gồm cả cập nhật hồ sơ, đổi mật khẩu (mục 6.1)
+│   │   │   ├── user.controller.js     # MỚI: admin quản lý khách hàng (xem, khóa/mở khóa)
 │   │   │   ├── book.controller.js
 │   │   │   ├── category.controller.js
 │   │   │   ├── author.controller.js
@@ -57,7 +60,8 @@ project-root/
 │   │   │   ├── stockImport.controller.js
 │   │   │   └── bookImage.controller.js    # MỚI: upload/xóa/đặt ảnh đại diện
 │   │   ├── routes/
-│   │   │   ├── auth.routes.js
+│   │   │   ├── auth.routes.js         # bao gồm cả route cập nhật hồ sơ, đổi mật khẩu
+│   │   │   ├── user.routes.js         # MỚI: admin quản lý khách hàng
 │   │   │   ├── book.routes.js         # bao gồm cả route upload/xóa/đặt ảnh đại diện (mục 6.5)
 │   │   │   ├── category.routes.js
 │   │   │   ├── author.routes.js
@@ -89,7 +93,9 @@ project-root/
 │   │   │   │   ├── BookDetail.vue
 │   │   │   │   ├── Cart.vue
 │   │   │   │   ├── Checkout.vue
-│   │   │   │   ├── OrderStatus.vue
+│   │   │   │   ├── OrderStatus.vue    # chi tiết 1 đơn hàng (dùng chung lúc chờ thanh toán và xem lại sau)
+│   │   │   │   ├── OrderList.vue      # MỚI: "Đơn hàng của tôi" — có filter, phân trang
+│   │   │   │   ├── Account.vue        # MỚI: xem/sửa hồ sơ, đổi mật khẩu
 │   │   │   │   ├── Login.vue
 │   │   │   │   └── Register.vue
 │   │   │   └── admin/
@@ -100,14 +106,17 @@ project-root/
 │   │   │       ├── PublisherManage.vue
 │   │   │       ├── SupplierManage.vue
 │   │   │       ├── StockImportManage.vue
-│   │   │       └── OrderManage.vue
+│   │   │       ├── OrderManage.vue
+│   │   │       ├── CustomerManage.vue # MỚI: admin xem/khóa/mở khóa tài khoản khách hàng
+│   │   │       └── Account.vue        # MỚI: admin xem/sửa hồ sơ, đổi mật khẩu của chính mình
 │   │   ├── stores/            # Pinia
 │   │   │   ├── auth.store.js
 │   │   │   ├── cart.store.js
 │   │   │   └── order.store.js
 │   │   ├── services/          # gọi API (axios)
 │   │   │   ├── api.js
-│   │   │   ├── auth.service.js
+│   │   │   ├── auth.service.js        # bao gồm cả cập nhật hồ sơ, đổi mật khẩu
+│   │   │   ├── user.service.js        # MỚI: admin quản lý khách hàng
 │   │   │   ├── book.service.js
 │   │   │   ├── cart.service.js
 │   │   │   └── order.service.js
@@ -141,7 +150,13 @@ JWT_EXPIRES_IN=7d
 SEPAY_API_TOKEN=your_sepay_api_token
 SEPAY_WEBHOOK_SECRET=your_webhook_secret   # dùng để verify request từ SePay
 SEPAY_ACCOUNT_NUMBER=your_bank_account
-SEPAY_BANK_CODE=your_bank_code
+SEPAY_BANK_CODE=your_bank_code             # mã ngân hàng dùng để tra cứu qua SePay API (nếu cần)
+
+# VietQR (tạo QR chuyển khoản fix cứng số tiền + nội dung)
+VIETQR_BANK_BIN=970422                     # mã BIN ngân hàng theo chuẩn VietQR, vd MB Bank = 970422 — tra tại https://vietqr.io/danh-sach-api
+VIETQR_ACCOUNT_NUMBER=your_bank_account    # thường trùng SEPAY_ACCOUNT_NUMBER
+VIETQR_ACCOUNT_NAME=NGUYEN VAN A           # tên chủ tài khoản, KHÔNG dấu, viết hoa (đúng yêu cầu VietQR)
+VIETQR_TEMPLATE=compact2                   # kiểu giao diện QR: compact | compact2 | qr_only | print
 
 # Frontend URL (dùng cho CORS)
 FRONTEND_URL=http://localhost:5173
@@ -252,7 +267,7 @@ CREATE TABLE orders (
     order_code VARCHAR(20) NOT NULL UNIQUE,
     user_id INT NOT NULL,
     total_amount DECIMAL(12,2) NOT NULL,
-    status ENUM('pending','paid','processing','shipping','completed','cancelled') NOT NULL DEFAULT 'pending',
+    status ENUM('pending','paid','processing','shipping','completed','cancelled','delivery_failed') NOT NULL DEFAULT 'pending',
     payment_method ENUM('cod','bank_transfer') NOT NULL DEFAULT 'bank_transfer',
     shipping_name VARCHAR(100) NOT NULL,
     shipping_phone VARCHAR(20) NOT NULL,
@@ -365,6 +380,12 @@ Mọi response trả về theo format thống nhất:
 
 HTTP status codes dùng: `200` OK, `201` Created, `400` Bad Request, `401` Unauthorized, `403` Forbidden, `404` Not Found, `409` Conflict, `500` Internal Server Error.
 
+**Quy ước phân trang & tìm kiếm (áp dụng thống nhất cho MỌI endpoint trả về danh sách)**: tất cả các API `GET` trả về nhiều bản ghi (books, categories, authors, publishers, suppliers, stock-imports, orders, users...) đều nhận 2 query param chung `page` (mặc định 1) và `limit` (mặc định 10, riêng `books` mặc định 12), và trả kèm object `pagination` trong `data`:
+```json
+"pagination": { "page": 1, "limit": 10, "total": 45, "total_pages": 5 }
+```
+Module nào có nhu cầu tìm kiếm sẽ nhận thêm `?keyword=` (tìm theo tên/trường chính của module đó bằng `LIKE '%keyword%'`, riêng `books` dùng FULLTEXT như đã nêu). Chi tiết param riêng của từng module được nêu cụ thể ở từng mục bên dưới.
+
 ---
 
 ## 6. API Endpoints
@@ -407,10 +428,25 @@ Response `200`:
   }
 }
 ```
-Logic: tìm user theo email → so sánh password bằng `bcrypt.compare` → ký JWT payload `{ id, role }`, hết hạn theo `JWT_EXPIRES_IN`.
+Logic: tìm user theo email (nếu không có → `401` `"INVALID_CREDENTIALS"`) → so sánh password bằng `bcrypt.compare` (sai → `401` `"INVALID_CREDENTIALS"`) → **kiểm tra `is_active = 1`, nếu tài khoản đã bị khóa → `403` `error_code: "ACCOUNT_LOCKED"`, message rõ ràng "Tài khoản của bạn đã bị khóa"** → ký JWT payload `{ id, role }`, hết hạn theo `JWT_EXPIRES_IN`.
 
 #### GET `/api/auth/me` (yêu cầu token)
 Response `200`: trả thông tin user hiện tại dựa vào token.
+
+#### PUT `/api/auth/me` (yêu cầu token) — MỚI, cập nhật hồ sơ cá nhân
+Dùng chung cho cả customer và admin tự sửa thông tin của chính mình.
+Request:
+```json
+{ "full_name": "Nguyễn Văn A", "phone": "0911222333", "address": "456 Đường XYZ, Q.2, TP.HCM" }
+```
+Logic: chỉ cho sửa `full_name`, `phone`, `address` — KHÔNG cho sửa `email` hay `role` qua endpoint này (đổi email/role coi như thao tác nhạy cảm, ngoài phạm vi bản đơn giản này). Trả lại thông tin user đã cập nhật (không kèm `password`).
+
+#### PUT `/api/auth/change-password` (yêu cầu token) — MỚI, đổi mật khẩu
+Request:
+```json
+{ "old_password": "123456", "new_password": "newpass789" }
+```
+Logic: lấy user hiện tại theo `req.user.id` → so sánh `old_password` với hash hiện tại bằng `bcrypt.compare` (sai → `400` `error_code: "WRONG_OLD_PASSWORD"`) → validate `new_password` tối thiểu 6 ký tự → hash mật khẩu mới bằng bcrypt → update. Response `200` chỉ trả message thành công, không trả token mới (token cũ vẫn dùng được bình thường vì JWT không lưu password trong payload).
 
 #### Đăng xuất (Logout) — Client-side only, KHÔNG có API endpoint
 Hệ thống dùng JWT stateless (server không lưu trạng thái đăng nhập), nên đăng xuất được xử lý **hoàn toàn ở phía client**, không cần gọi API:
@@ -426,11 +462,13 @@ Token JWT cũ vẫn còn hợp lệ về mặt kỹ thuật cho tới khi hết 
 
 | Method | Endpoint | Quyền | Mô tả |
 |---|---|---|---|
-| GET | `/api/categories` | Public | Danh sách loại sách |
+| GET | `/api/categories` | Public | Danh sách loại sách — hỗ trợ `?keyword=&page=&limit=` |
 | GET | `/api/categories/:id` | Public | Chi tiết 1 loại |
 | POST | `/api/categories` | Admin | Tạo loại sách mới |
 | PUT | `/api/categories/:id` | Admin | Sửa loại sách |
 | DELETE | `/api/categories/:id` | Admin | Xóa loại sách |
+
+Response danh sách trả kèm `pagination` theo đúng quy ước chung ở mục 5.
 
 POST/PUT request:
 ```json
@@ -445,11 +483,13 @@ Logic xóa: kiểm tra còn `book` nào thuộc category này không, nếu còn
 
 | Method | Endpoint | Quyền | Mô tả |
 |---|---|---|---|
-| GET | `/api/authors` | Public | Danh sách tác giả (hỗ trợ `?keyword=` tìm theo tên) |
+| GET | `/api/authors` | Public | Danh sách tác giả — hỗ trợ `?keyword=&page=&limit=` tìm theo tên |
 | GET | `/api/authors/:id` | Public | Chi tiết 1 tác giả |
 | POST | `/api/authors` | Admin | Thêm tác giả mới |
 | PUT | `/api/authors/:id` | Admin | Sửa thông tin tác giả |
 | DELETE | `/api/authors/:id` | Admin | Xóa tác giả |
+
+Response danh sách trả kèm `pagination` theo đúng quy ước chung ở mục 5.
 
 POST/PUT request:
 ```json
@@ -464,11 +504,13 @@ Logic xóa: kiểm tra còn `book` nào tham chiếu `author_id` này không, n�
 
 | Method | Endpoint | Quyền | Mô tả |
 |---|---|---|---|
-| GET | `/api/publishers` | Public | Danh sách nhà xuất bản |
+| GET | `/api/publishers` | Public | Danh sách nhà xuất bản — hỗ trợ `?keyword=&page=&limit=` tìm theo tên |
 | GET | `/api/publishers/:id` | Public | Chi tiết 1 nhà xuất bản |
 | POST | `/api/publishers` | Admin | Thêm nhà xuất bản mới |
 | PUT | `/api/publishers/:id` | Admin | Sửa thông tin |
 | DELETE | `/api/publishers/:id` | Admin | Xóa |
+
+Response danh sách trả kèm `pagination` theo đúng quy ước chung ở mục 5.
 
 POST/PUT request:
 ```json
@@ -648,7 +690,13 @@ Logic xử lý (transaction):
 6. Insert từng dòng vào `order_items` (snapshot `title`, `price` tại thời điểm mua).
 7. Insert `order_status_history` (`status = 'pending'`, `changed_by = 'system'`).
 8. Xóa toàn bộ `cart_items` của user.
-9. Nếu `payment_method = 'bank_transfer'`: insert 1 dòng `payments` (`status = 'pending'`), trả về kèm thông tin QR/số tài khoản để FE hiển thị.
+9. Nếu `payment_method = 'bank_transfer'`: insert 1 dòng `payments` (`status = 'pending'`), build `qr_url` theo chuẩn **VietQR** (ảnh QR nhúng sẵn số tiền + nội dung, khách chỉ cần quét — không cần gõ tay), trả về kèm thông tin QR/số tài khoản để FE hiển thị.
+
+`qr_url` build theo format:
+```
+https://img.vietqr.io/image/{VIETQR_BANK_BIN}-{VIETQR_ACCOUNT_NUMBER}-{VIETQR_TEMPLATE}.png?amount={total_amount}&addInfo={order_code}&accountName={VIETQR_ACCOUNT_NAME}
+```
+(3 tham số `amount`, `addInfo`, `accountName` cần `encodeURIComponent` trước khi ghép vào URL, đặc biệt `accountName` nếu có khoảng trắng.)
 
 Response `201`:
 ```json
@@ -662,16 +710,29 @@ Response `201`:
     "status": "pending",
     "payment_info": {
       "bank_account": "0123456789",
-      "bank_code": "MB",
+      "bank_bin": "970422",
+      "account_name": "NGUYEN VAN A",
       "amount": 300000,
       "transfer_content": "DH20260814001",
-      "qr_url": "https://qr.sepay.vn/img?acc=0123456789&bank=MB&amount=300000&des=DH20260814001"
+      "qr_url": "https://img.vietqr.io/image/970422-0123456789-compact2.png?amount=300000&addInfo=DH20260814001&accountName=NGUYEN%20VAN%20A"
     }
   }
 }
 ```
 
 #### GET `/api/orders` — danh sách đơn của user hiện tại (hoặc tất cả nếu admin + query `?all=true`)
+Query params hỗ trợ (dùng được cho cả customer xem đơn của mình lẫn admin xem toàn bộ):
+```
+?status=paid              # lọc theo trạng thái đơn
+&from_date=2026-08-01     # lọc theo created_at từ ngày
+&to_date=2026-08-31       # lọc theo created_at đến ngày
+&keyword=DH2026           # tìm theo order_code; nếu admin (all=true) tìm thêm theo shipping_name
+&all=true                 # chỉ admin mới dùng được, bỏ qua filter user_id
+&page=1
+&limit=10
+```
+Response trả kèm `pagination` theo đúng quy ước chung ở mục 5.
+
 #### GET `/api/orders/:id` — chi tiết đơn hàng (kèm `order_items`)
 #### GET `/api/orders/:id/status` — chỉ trả về status hiện tại, dùng để FE polling nếu không dùng socket:
 ```json
@@ -683,13 +744,33 @@ Request:
 ```json
 { "status": "shipping", "note": "Đã giao cho đơn vị vận chuyển" }
 ```
-Logic: chỉ cho phép chuyển trạng thái theo đúng thứ tự (`paid → processing → shipping → completed`), không cho nhảy cóc hoặc quay lui trừ `cancelled`. Insert thêm dòng vào `order_status_history` với `changed_by = 'admin'`. Emit socket event `order:status_updated` tới user sở hữu đơn.
+Logic: chỉ cho phép chuyển trạng thái theo đúng thứ tự cho phép — dùng 1 map định nghĩa các bước chuyển hợp lệ, KHÔNG hardcode if-else:
+```
+pending      → paid | cancelled
+paid         → processing | cancelled
+processing   → shipping
+shipping     → completed | delivery_failed
+completed    → (kết thúc, không chuyển tiếp)
+cancelled    → (kết thúc)
+delivery_failed → (kết thúc — xem ghi chú xử lý riêng bên dưới)
+```
+Không cho nhảy cóc hoặc quay lui ngoài các mũi tên trên. Insert thêm dòng vào `order_status_history` với `changed_by = 'admin'`.
+
+**Trường hợp `shipping → delivery_failed`** (khách không nhận hàng/từ chối nhận khi giao) — ĐÂY LÀ TRƯỜNG HỢP ĐẶC BIỆT DUY NHẤT NGOÀI WEBHOOK ĐƯỢC PHÉP ĐỔI `stock_quantity`, xử lý trong 1 **transaction**:
+1. Update `orders.status = 'delivery_failed'`.
+2. Lấy `order_items` của đơn, với từng dòng: `UPDATE books SET stock_quantity = stock_quantity + quantity` (hoàn lại đúng số lượng đã trừ lúc đơn chuyển `paid`).
+3. Insert `order_status_history` (`status = 'delivery_failed'`, `changed_by = 'admin'`, note bắt buộc phải có lý do, ví dụ "Khách không nhận hàng").
+4. Emit socket `order:status_updated` tới khách như bình thường.
+
+Với các trường hợp chuyển trạng thái khác (không phải `delivery_failed`), giữ nguyên logic cũ: chỉ update `orders.status` + insert history + emit socket, KHÔNG đụng vào `stock_quantity`.
 
 #### DELETE `/api/orders/:id` — Hủy đơn (chỉ khi status = `pending`)
 
 ---
 
 ### 6.8. Payment Webhook (`/api/webhook/sepay`) — Public nhưng phải verify secret
+
+> **Lưu ý quan trọng**: QR VietQR chỉ giúp khách khỏi gõ tay số tiền/nội dung — đây là hỗ trợ UX, **không phải cơ chế bảo mật**. Một số app ngân hàng vẫn cho phép khách sửa lại nội dung/số tiền trước khi xác nhận chuyển. Vì vậy toàn bộ bước so khớp `content` và `transferAmount` bên dưới **bắt buộc phải giữ nguyên**, không được bỏ qua chỉ vì đã dùng QR fix sẵn.
 
 #### POST `/api/webhook/sepay`
 SePay sẽ gọi endpoint này mỗi khi có giao dịch chuyển khoản vào tài khoản đã đăng ký. Payload thực tế theo tài liệu SePay, cấu trúc mẫu:
@@ -731,11 +812,13 @@ Response cho SePay:
 
 | Method | Endpoint | Mô tả |
 |---|---|---|
-| GET | `/api/suppliers` | Danh sách nhà cung cấp |
+| GET | `/api/suppliers` | Danh sách nhà cung cấp — hỗ trợ `?keyword=&page=&limit=` tìm theo tên |
 | GET | `/api/suppliers/:id` | Chi tiết 1 nhà cung cấp |
 | POST | `/api/suppliers` | Thêm nhà cung cấp |
 | PUT | `/api/suppliers/:id` | Sửa thông tin |
 | DELETE | `/api/suppliers/:id` | Xóa |
+
+Response danh sách trả kèm `pagination` theo đúng quy ước chung ở mục 5.
 
 POST/PUT request:
 ```json
@@ -807,6 +890,60 @@ Response `201`:
 
 ---
 
+### 6.11. Users — Quản lý khách hàng (`/api/users`) — MỚI, Admin only
+
+Đây là phần admin xem và quản lý tài khoản khách hàng. Việc tự xem/sửa hồ sơ, đổi mật khẩu của chính người dùng (dù là customer hay admin) đã có sẵn ở mục 6.1 (`GET/PUT /api/auth/me`, `PUT /api/auth/change-password`) — mục này chỉ dành cho **admin thao tác lên tài khoản người khác**.
+
+| Method | Endpoint | Mô tả |
+|---|---|---|
+| GET | `/api/users` | Danh sách khách hàng — hỗ trợ `?keyword=&status=&page=&limit=` |
+| GET | `/api/users/:id` | Chi tiết 1 khách hàng |
+| PUT | `/api/users/:id/lock` | Khóa tài khoản |
+| PUT | `/api/users/:id/unlock` | Mở khóa tài khoản |
+
+**GET `/api/users` query params:**
+```
+?keyword=nguyen           # tìm theo full_name hoặc email, dùng LIKE
+&status=active            # active (is_active=1) | locked (is_active=0), bỏ trống = lấy tất cả
+&page=1
+&limit=10
+```
+Mặc định chỉ trả `role = 'customer'` (đúng tinh thần "quản lý khách hàng" — không lẫn tài khoản admin khác vào danh sách này).
+
+Response mẫu:
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": 5,
+        "full_name": "Nguyễn Văn A",
+        "email": "a@example.com",
+        "phone": "0900000000",
+        "is_active": true,
+        "total_orders": 3,
+        "created_at": "2026-08-01T10:00:00.000Z"
+      }
+    ],
+    "pagination": { "page": 1, "limit": 10, "total": 20, "total_pages": 2 }
+  }
+}
+```
+`total_orders` = đếm số đơn hàng của khách (JOIN/subquery đếm từ bảng `orders`, không bắt buộc phức tạp, chỉ cần đúng số).
+
+#### PUT `/api/users/:id/lock`
+Request (không bắt buộc):
+```json
+{ "reason": "Vi phạm chính sách đặt hàng nhiều lần không nhận" }
+```
+Logic: set `is_active = 0`. Không cho khóa tài khoản có `role = 'admin'` (kể cả chính mình) — trả `400` `error_code: "CANNOT_LOCK_ADMIN"` nếu cố khóa 1 admin khác. Sau khi bị khóa, người dùng đó không đăng nhập được nữa (chặn ở bước login, mục 6.1) — token cũ nếu còn hạn vẫn dùng được cho tới khi hết hạn (giới hạn đã biết của JWT stateless, xem business rule số 8).
+
+#### PUT `/api/users/:id/unlock`
+Logic: set `is_active = 1`.
+
+---
+
 ## 7. Socket.io Events
 
 | Event | Hướng | Payload | Mô tả |
@@ -830,13 +967,137 @@ Client (Vue) join room theo `user_id` sau khi login: `socket.emit('join', userId
 
 1. Password luôn hash bằng bcrypt, không bao giờ trả `password` trong bất kỳ response nào.
 2. `order_items.price` và `book_title` luôn snapshot tại thời điểm đặt hàng — không join sang `books` để lấy giá hiện tại khi hiển thị lịch sử đơn cũ.
-3. **`stock_quantity` của `books` chỉ được phép thay đổi qua đúng 2 nguồn**:
+3. **`stock_quantity` của `books` chỉ được phép thay đổi qua đúng 3 nguồn**:
    - **Tăng (+)**: khi tạo phiếu nhập hàng thành công (mục 6.10).
+   - **Tăng (+)**: khi đơn hàng chuyển sang `delivery_failed` — hoàn lại số lượng đã trừ trước đó (mục 6.7).
    - **Giảm (-)**: khi đơn hàng chuyển sang trạng thái `paid` (mục 6.8, hoặc khi admin xác nhận `paid` thủ công nếu có).
    API `POST /api/books` và `PUT /api/books/:id` **không được đọc hay set trực tiếp** field `stock_quantity` từ request body, kể cả khi client cố tình gửi kèm — sách mới luôn khởi tạo `stock_quantity = 0`.
-4. Toàn bộ thao tác tạo đơn hàng (mục 6.7), xử lý webhook (mục 6.8), và tạo phiếu nhập hàng (mục 6.10) phải dùng **database transaction** để đảm bảo toàn vẹn dữ liệu (rollback nếu có lỗi giữa chừng) — đặc biệt vì các thao tác này đều vừa ghi nhiều bảng vừa cập nhật `stock_quantity`.
+4. Toàn bộ thao tác tạo đơn hàng (mục 6.7), xử lý webhook (mục 6.8), tạo phiếu nhập hàng (mục 6.10), và chuyển trạng thái đơn sang `delivery_failed` (mục 6.7) phải dùng **database transaction** để đảm bảo toàn vẹn dữ liệu (rollback nếu có lỗi giữa chừng) — đặc biệt vì các thao tác này đều vừa ghi nhiều bảng vừa cập nhật `stock_quantity`.
 5. Webhook endpoint không được yêu cầu JWT của user (vì SePay gọi trực tiếp), nhưng bắt buộc phải verify bằng secret riêng.
-6. Trạng thái đơn hàng chỉ đi theo 1 chiều: `pending → paid → processing → shipping → completed`, hoặc `pending/paid → cancelled`. Không cho phép set trạng thái tùy ý.
+6. Trạng thái đơn hàng chỉ đi theo 1 chiều, dùng đúng bảng chuyển trạng thái đã định nghĩa ở mục 6.7 (`pending → paid/cancelled`, `paid → processing/cancelled`, `processing → shipping`, `shipping → completed/delivery_failed`). `completed`, `cancelled`, `delivery_failed` là các trạng thái kết thúc, không chuyển tiếp được nữa. Không cho phép set trạng thái tùy ý ngoài bảng này.
 7. Không cho xóa `category`, `author`, `publisher` nếu còn `book` nào đang tham chiếu tới; không cho xóa `supplier` nếu còn `stock_import` nào tham chiếu tới — trả lỗi `409` với `error_code` tương ứng đã nêu ở từng mục.
 8. Đăng xuất xử lý hoàn toàn ở phía client (xóa token khỏi `localStorage` + reset Pinia store) — không có API endpoint, không có bảng dữ liệu phía server cho việc này (xem mục 6.1).
 9. Ảnh sách luôn lưu trên Cloudinary, KHÔNG lưu file trực tiếp trên ổ đĩa server. Khi xóa 1 ảnh (`DELETE /api/books/:id/images/:imageId`), bắt buộc phải gọi `cloudinary.uploader.destroy()` để xóa file thật trước, rồi mới xóa row trong `book_images` — tránh để lại ảnh rác trên Cloudinary không ai quản lý.
+10. Tài khoản bị khóa (`is_active = 0`) không đăng nhập được (chặn ở `POST /api/auth/login`, trả `403 ACCOUNT_LOCKED`) — nhưng token đã phát hành trước đó vẫn còn hiệu lực kỹ thuật cho tới khi hết hạn, vì hệ thống không dùng blacklist token (đúng rule số 8). Không cho khóa tài khoản có `role = 'admin'` qua API `/api/users/:id/lock` (mục 6.11).
+11. Mọi endpoint `GET` trả về danh sách đều phải tuân theo đúng quy ước phân trang chung ở mục 5 (`page`, `limit`, trả kèm object `pagination`) — không tạo ngoại lệ trả về nguyên mảng không phân trang, kể cả các module quản trị nội bộ như Categories, Authors, Publishers, Suppliers, Users.
+
+---
+
+## 10. Quy chuẩn giao diện (Design System)
+
+> Mục này tồn tại để mọi trang được code ở các đợt khác nhau (có thể qua nhiều phiên làm việc với AI khác nhau) đều dùng chung 1 bộ màu/font/spacing — tránh tình trạng mỗi trang một kiểu do AI tự bịa ra giá trị khác nhau mỗi lần. AI code bất kỳ trang nào **phải tra cứu mục này trước**, không tự chọn màu/font ngoài danh sách dưới đây.
+
+### 10.1. Định hướng thẩm mỹ
+
+Chủ đề: hiệu sách trực tuyến hướng tới người đọc Việt Nam — cảm giác ấm áp, tin cậy như một tiệm sách vật lý, không lạnh lẽo kiểu tech dashboard thuần túy, nhưng vẫn rõ ràng mạch lạc vì đây là app CRUD nhiều bảng biểu/form. Tránh 2 thái cực: (1) màu mè, hiệu ứng động thừa thãi; (2) trắng đen mặc định không có điểm nhấn nào (nhìn "AI-generated" — nền `#F4F1EA` + cam đất `#D97757` là tổ hợp bị lạm dụng, KHÔNG dùng chính xác cặp màu này).
+
+### 10.2. Bảng màu (Design Tokens)
+
+| Tên token | Hex | Dùng cho |
+|---|---|---|
+| `primary` | `#2B3A67` | Header, nút hành động chính, link, sidebar admin — xanh navy đậm gợi cảm giác bìa sách cứng cổ điển |
+| `primary-light` | `#4A5C8A` | Hover state của primary, badge phụ |
+| `accent` | `#B8862F` | Điểm nhấn: giá tiền, nút CTA nổi bật ("Mua ngay", "Thêm vào giỏ"), icon quan trọng — vàng đồng gợi chữ mạ vàng trên gáy sách |
+| `background` | `#F7F6F3` | Nền trang (KHÔNG dùng `#F4F1EA` — gần giống nhưng phải lệch tông để tránh trùng tổ hợp bị lạm dụng) |
+| `surface` | `#FFFFFF` | Nền card, bảng, modal |
+| `text-primary` | `#1E2233` | Chữ chính (không dùng đen tuyệt đối `#000000`) |
+| `text-secondary` | `#6B7280` | Chữ phụ, placeholder, caption |
+| `border` | `#E5E3DD` | Viền input, divider |
+| `success` | `#2F855A` | Trạng thái tích cực: `paid`, `completed`, tài khoản đang hoạt động |
+| `warning` | `#B7791F` | Trạng thái chờ: `pending`, `processing` |
+| `info` | `#2C5282` | Trạng thái trung tính: `shipping` |
+| `danger` | `#C53030` | Trạng thái tiêu cực: `cancelled`, tài khoản bị khóa, lỗi form |
+| `danger-alt` | `#9C4221` | Trạng thái đặc biệt: `delivery_failed` (khác tông với `danger` để phân biệt "hủy" và "giao thất bại", theo yêu cầu ở mục 6.7) |
+
+**Bảng màu badge trạng thái đơn hàng (áp dụng thống nhất mọi nơi hiển thị — OrderList, OrderManage, OrderStatus):**
+
+| Status | Màu nền badge | Màu chữ | Nhãn tiếng Việt |
+|---|---|---|---|
+| `pending` | `warning` nhạt (`#FEF3C7`) | `warning` | Chờ xử lý |
+| `paid` | `info` nhạt (`#DBEAFE`) | `info` | Đã thanh toán |
+| `processing` | `primary-light` nhạt (`#E0E7FF`) | `primary` | Đang chuẩn bị |
+| `shipping` | `accent` nhạt (`#FEF0D6`) | `accent` | Đang giao |
+| `completed` | `success` nhạt (`#D1FAE5`) | `success` | Hoàn thành |
+| `cancelled` | `danger` nhạt (`#FEE2E2`) | `danger` | Đã hủy |
+| `delivery_failed` | `danger-alt` nhạt (`#FDEBD8`) | `danger-alt` | Giao không thành công |
+
+### 10.3. Typography
+
+- **Font tiêu đề** (h1-h3, tên sách nổi bật ở trang chủ/chi tiết): `Lora` (serif, gợi cảm giác sách in) — import từ Google Fonts.
+- **Font nội dung** (toàn bộ còn lại — body, form, bảng, button): `Be Vietnam Pro` (sans-serif, hỗ trợ dấu tiếng Việt rõ nét, tránh tình trạng font lạ hiển thị dấu bị lỗi/xấu).
+- Type scale (dùng nhất quán, không tự chế thêm size khác):
+
+| Cấp | Size | Weight | Dùng cho |
+|---|---|---|---|
+| `h1` | 32px / 40px (mobile/desktop) | 600 | Tiêu đề trang (vd "Chi tiết sách") |
+| `h2` | 24px / 28px | 600 | Tiêu đề section (vd "Sách liên quan") |
+| `h3` | 18px / 20px | 600 | Tiêu đề card, tên sách trong grid |
+| `body` | 15px | 400 | Nội dung mặc định |
+| `small` | 13px | 400 | Caption, timestamp, ghi chú phụ |
+
+### 10.4. Spacing, bo góc, đổ bóng
+
+Dùng thang spacing mặc định của Tailwind (bội số của 4px: `p-2`(8px), `p-4`(16px), `p-6`(24px), `p-8`(32px)) — KHÔNG dùng giá trị px tùy tiện ngoài thang này.
+
+- Bo góc: `rounded-lg` (8px) cho card/input/button, `rounded-full` cho badge/avatar.
+- Đổ bóng: chỉ dùng `shadow-sm` cho card thường, `shadow-md` cho dropdown/modal — tránh đổ bóng đậm gây rối mắt.
+
+### 10.5. Component patterns (áp dụng lại y hệt ở mọi trang, không tự chế mới)
+
+- **Button chính** (`Đặt hàng`, `Lưu`, `Tạo mới`): nền `accent`, chữ trắng, `rounded-lg`, `px-4 py-2`, hover tối màu 10%.
+- **Button phụ** (`Hủy`, `Quay lại`): viền `border`, nền trắng, chữ `text-primary`.
+- **Button nguy hiểm** (`Xóa`, `Khóa tài khoản`): nền `danger`, chữ trắng — LUÔN kèm `confirm dialog` trước khi submit (đã quy định rải rác ở các prompt trước, giờ chuẩn hóa lại đây).
+- **Input/Select**: viền `border`, `rounded-lg`, `px-3 py-2`, khi focus đổi viền sang `primary` (2px, có `outline` rõ ràng cho keyboard navigation — bắt buộc vì lý do accessibility).
+- **Card sách** (trang Home/BookDetail): `surface` nền, `shadow-sm`, ảnh tỉ lệ `3:4` (tỉ lệ bìa sách thật), hover nâng nhẹ (`hover:shadow-md` + `hover:-translate-y-0.5`).
+- **Bảng dữ liệu** (mọi trang *Manage.vue phía admin): header nền `background`, chữ `text-secondary` uppercase nhỏ, các dòng cách nhau bằng `border-b border-border` (không dùng zebra-stripe nhiều màu gây rối), hover dòng nền `background`.
+- **Badge trạng thái**: `rounded-full`, `px-2.5 py-0.5`, chữ nhỏ (`text-xs`, weight 600) — màu theo đúng bảng 10.2.
+- **Empty state** (giỏ hàng trống, chưa có sách...): icon/minh họa đơn giản + 1 câu mô tả ngắn bằng giọng điệu trung tính (không lỗi, không xin lỗi) + 1 hành động gợi ý rõ ràng (vd nút "Về trang chủ").
+- **Pagination**: dùng chung 1 component `Pagination.vue` (đã yêu cầu ở đợt code trước) — nút Trước/Sau + số trang hiện tại/tổng trang, style theo Button phụ.
+- **Toast/thông báo**: góc trên phải, tự ẩn sau ~3s, màu nền theo `success`/`danger` tương ứng loại thông báo.
+
+### 10.6. Layout khung trang
+
+- **Customer**: header cố định (logo bên trái, thanh tìm kiếm giữa, icon giỏ hàng + user menu bên phải) + nội dung + footer đơn giản (thông tin liên hệ, không cần cầu kỳ).
+- **Admin**: sidebar cố định bên trái (danh sách các mục quản lý, đã liệt kê ở mục 2 — nhóm lại theo cụm: Sản phẩm (Books/Categories/Authors/Publishers), Kho (Suppliers/StockImports), Đơn hàng (OrderManage), Người dùng (CustomerManage)) + topbar nhỏ bên trên nội dung (tên admin đang đăng nhập + nút đăng xuất) + nội dung chính bên phải.
+
+### 10.7. Responsive & Accessibility (bắt buộc, không tùy chọn)
+
+- Mobile-first: mọi trang phải xem được ở màn hình 375px trở lên, sidebar admin thu gọn thành menu hamburger dưới breakpoint `md` (768px).
+- Toàn bộ input/button phải có `focus:outline` hoặc `focus:ring` rõ ràng (không tắt outline mặc định của trình duyệt).
+- Vùng bấm tối thiểu 44x44px trên mobile (nút, icon giỏ hàng, item trong danh sách).
+- Ảnh luôn có `alt` mô tả (đặc biệt ảnh sách — dùng `title` sách làm `alt`).
+
+### 10.8. Cấu hình Tailwind mẫu (để AI dùng luôn, không tự bịa giá trị khác)
+
+```js
+// tailwind.config.js
+module.exports = {
+  content: ['./index.html', './src/**/*.{vue,js}'],
+  theme: {
+    extend: {
+      colors: {
+        primary: { DEFAULT: '#2B3A67', light: '#4A5C8A' },
+        accent: '#B8862F',
+        background: '#F7F6F3',
+        surface: '#FFFFFF',
+        'text-primary': '#1E2233',
+        'text-secondary': '#6B7280',
+        border: '#E5E3DD',
+        success: '#2F855A',
+        warning: '#B7791F',
+        info: '#2C5282',
+        danger: '#C53030',
+        'danger-alt': '#9C4221',
+      },
+      fontFamily: {
+        display: ['Lora', 'serif'],
+        body: ['"Be Vietnam Pro"', 'sans-serif'],
+      },
+      borderRadius: {
+        lg: '8px',
+      },
+    },
+  },
+  plugins: [],
+};
+```

@@ -1,13 +1,17 @@
 const categoryModel = require("../models/category.model");
 const { success, error } = require("../utils/response");
 
-// GET /api/categories — public
+// GET /api/categories?keyword=&page=&limit= — public
 async function getAll(req, res, next) {
   try {
-    const items = await categoryModel.findAll();
+    const { keyword } = req.query;
+    const page = parseInt(req.query.page, 10) || 1;
+    const limit = parseInt(req.query.limit, 10) || 10;
+
+    const { items, total } = await categoryModel.findAll({ keyword, page, limit });
     return success(res, {
       message: "Lấy danh sách danh mục thành công",
-      data: { items },
+      data: { items, pagination: { page, limit, total, total_pages: Math.ceil(total / limit) || 0 } },
     });
   } catch (err) {
     next(err);

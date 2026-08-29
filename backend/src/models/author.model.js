@@ -2,17 +2,31 @@
 // books giờ chỉ lưu author_id (khóa ngoại) thay vì lưu thẳng tên tác giả dạng text.
 const pool = require('../config/db');
 
-// keyword (tùy chọn): tìm theo tên tác giả bằng LIKE
-async function findAll({ keyword } = {}) {
+// { keyword, page, limit } -> { items, total } — theo đúng quy ước phân trang chung mục 5.
+async function findAll({ keyword, page = 1, limit = 10 } = {}) {
+  const conditions = [];
+  const params = [];
+
   if (keyword && keyword.trim()) {
-    const [rows] = await pool.execute(
-      'SELECT * FROM authors WHERE name LIKE ? ORDER BY id ASC',
-      [`%${keyword.trim()}%`]
-    );
-    return rows;
+    conditions.push('name LIKE ?');
+    params.push(`%${keyword.trim()}%`);
   }
-  const [rows] = await pool.execute('SELECT * FROM authors ORDER BY id ASC');
-  return rows;
+
+  const whereSql = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const [countRows] = await pool.query(`SELECT COUNT(*) AS total FROM authors ${whereSql}`, params);
+  const total = countRows[0].total;
+
+  const safeLimit = Math.max(1, Math.min(100, parseInt(limit, 10) || 10));
+  const safePage = Math.max(1, parseInt(page, 10) || 1);
+  const offset = (safePage - 1) * safeLimit;
+
+  const [rows] = await pool.query(
+    `SELECT * FROM authors ${whereSql} ORDER BY id ASC LIMIT ${safeLimit} OFFSET ${offset}`,
+    params
+  );
+
+  return { items: rows, total };
 }
 
 async function findById(id) {

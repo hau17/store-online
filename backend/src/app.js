@@ -20,6 +20,7 @@ const orderRoutes = require('./routes/order.routes');
 const paymentRoutes = require('./routes/payment.routes');
 const supplierRoutes = require('./routes/supplier.routes');
 const stockImportRoutes = require('./routes/stockImport.routes');
+const userRoutes = require('./routes/user.routes');
 
 const app = express();
 
@@ -50,6 +51,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/webhook', paymentRoutes); // POST /api/webhook/sepay
 app.use('/api/suppliers', supplierRoutes);
 app.use('/api/stock-imports', stockImportRoutes);
+app.use('/api/users', userRoutes);
 
 // Route không khớp path nào ở trên -> 404
 app.use((req, res) => {

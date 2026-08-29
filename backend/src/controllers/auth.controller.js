@@ -101,11 +101,13 @@ async function login(req, res, next) {
       });
     }
 
-    // 3. Tài khoản bị khóa (is_active = 0) thì không cho đăng nhập
+    // 3. Tài khoản bị khóa (is_active = 0) thì không cho đăng nhập — kiểm tra SAU khi đã xác nhận
+    // đúng password (đúng thứ tự bước trong spec mục 6.1), không lộ trạng thái khóa trước khi xác
+    // thực được danh tính người gọi.
     if (!user.is_active) {
       return error(res, {
-        message: 'Tài khoản đã bị khóa',
-        errorCode: 'ACCOUNT_DISABLED',
+        message: 'Tài khoản của bạn đã bị khóa',
+        errorCode: 'ACCOUNT_LOCKED',
         statusCode: 403,
       });
     }
@@ -146,4 +148,77 @@ async function getMe(req, res, next) {
   }
 }
 
-module.exports = { register, login, getMe };
+const PHONE_REGEX = /^[0-9]{9,11}$/;
+
+// PUT /api/auth/me — cập nhật hồ sơ cá nhân, dùng chung cho cả customer và admin tự sửa (mục 6.1).
+// Chỉ cho sửa full_name/phone/address — KHÔNG đọc email/role từ body dù client có gửi kèm.
+async function updateMyProfile(req, res, next) {
+  try {
+    const { full_name, phone, address } = req.body;
+
+    if (full_name !== undefined && !full_name.trim()) {
+      return error(res, {
+        message: 'Họ tên không được để trống',
+        errorCode: 'VALIDATION_ERROR',
+        statusCode: 400,
+      });
+    }
+    if (phone !== undefined && phone && !PHONE_REGEX.test(phone.trim())) {
+      return error(res, {
+        message: 'Số điện thoại không hợp lệ (9-11 chữ số)',
+        errorCode: 'VALIDATION_ERROR',
+        statusCode: 400,
+      });
+    }
+
+    await userModel.updateProfile(req.user.id, { full_name, phone, address });
+    const updated = await userModel.findById(req.user.id); // đã tự loại cột password
+    return success(res, { message: 'Cập nhật hồ sơ thành công', data: updated });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// PUT /api/auth/change-password
+async function changeMyPassword(req, res, next) {
+  try {
+    const { old_password, new_password } = req.body;
+
+    if (!old_password || !new_password) {
+      return error(res, {
+        message: 'Vui lòng nhập đủ mật khẩu cũ và mật khẩu mới',
+        errorCode: 'VALIDATION_ERROR',
+        statusCode: 400,
+      });
+    }
+
+    // Cần bản ghi CÓ password (hash) để so sánh — findById() thường dùng không trả cột này.
+    const user = await userModel.findByIdWithPassword(req.user.id);
+    const isOldPasswordValid = await bcrypt.compare(old_password, user.password);
+    if (!isOldPasswordValid) {
+      return error(res, {
+        message: 'Mật khẩu cũ không đúng',
+        errorCode: 'WRONG_OLD_PASSWORD',
+        statusCode: 400,
+      });
+    }
+
+    if (new_password.length < 6) {
+      return error(res, {
+        message: 'Mật khẩu mới phải có ít nhất 6 ký tự',
+        errorCode: 'VALIDATION_ERROR',
+        statusCode: 400,
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(new_password, SALT_ROUNDS);
+    await userModel.updatePassword(req.user.id, hashedPassword);
+
+    // Không trả token mới — JWT không lưu password trong payload nên token cũ vẫn hợp lệ bình thường.
+    return success(res, { message: 'Đổi mật khẩu thành công' });
+  } catch (err) {
+    next(err);
+  }
+}
+
+module.exports = { register, login, getMe, updateMyProfile, changeMyPassword };

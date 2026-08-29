@@ -17,4 +17,14 @@ function initOrderSocket(io) {
   });
 }
 
+// Dùng chung cho mọi nơi cần bắn event tới đúng 1 user (order.controller.js, và webhook thanh
+// toán ở bước sau) mà không cần biết chi tiết cách đặt tên room ở trên — chỉ cần gọi hàm này.
+function emitToUser(io, userId, eventName, payload) {
+  io.to(`user_${userId}`).emit(eventName, payload);
+}
+
+// Gắn emitToUser làm property của initOrderSocket thay vì đổi module.exports thành 1 object
+// { initOrderSocket, emitToUser } — để không phải sửa app.js (đang require file này như 1 hàm
+// gọi thẳng: initOrderSocket(io)). Function trong JS vẫn là object nên gắn thêm property được.
 module.exports = initOrderSocket;
+module.exports.emitToUser = emitToUser;

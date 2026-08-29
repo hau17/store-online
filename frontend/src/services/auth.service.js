@@ -11,4 +11,10 @@ export default {
   getMe() {
     return api.get('/auth/me');
   },
+  updateProfile(data) {
+    return api.put('/auth/me', data);
+  },
+  changePassword(data) {
+    return api.put('/auth/change-password', data);
+  },
 };

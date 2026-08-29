@@ -1,11 +1,21 @@
 <script setup>
-// Quản lý tác giả: cùng khuôn mẫu với CategoryManage.vue.
+// Quản lý tác giả: cùng khuôn mẫu với CategoryManage.vue (tìm kiếm + phân trang).
 import { ref, onMounted } from 'vue';
 import authorService from '../../services/author.service';
+import { useToast } from '../../composables/useToast';
+import Pagination from '../../components/common/Pagination.vue';
+import BaseButton from '../../components/common/BaseButton.vue';
+import ConfirmDialog from '../../components/common/ConfirmDialog.vue';
+
+const { showToast } = useToast();
 
 const authors = ref([]);
+const pagination = ref({ page: 1, limit: 10, total: 0, total_pages: 0 });
 const loading = ref(true);
 const errorMessage = ref('');
+
+const keyword = ref('');
+let debounceTimer = null;
 
 const showForm = ref(false);
 const editingId = ref(null);
@@ -13,17 +23,29 @@ const form = ref({ name: '', bio: '' });
 const formError = ref('');
 const submitting = ref(false);
 
-async function fetchAuthors() {
+const confirmDelete = ref({ show: false, author: null });
+
+async function fetchAuthors(page = 1) {
   loading.value = true;
   errorMessage.value = '';
   try {
-    const res = await authorService.getAuthors();
+    const res = await authorService.getAuthors({ keyword: keyword.value || undefined, page, limit: 10 });
     authors.value = res.data.data.items;
+    pagination.value = res.data.data.pagination;
   } catch (err) {
     errorMessage.value = err.response?.data?.message || 'Không tải được danh sách tác giả';
   } finally {
     loading.value = false;
   }
+}
+
+function onKeywordInput() {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(() => fetchAuthors(1), 400);
+}
+
+function goToPage(page) {
+  fetchAuthors(page);
 }
 
 function openCreateForm() {
@@ -55,11 +77,13 @@ async function submitForm() {
   try {
     if (editingId.value) {
       await authorService.updateAuthor(editingId.value, form.value);
+      showToast('Cập nhật tác giả thành công');
     } else {
       await authorService.createAuthor(form.value);
+      showToast('Thêm tác giả thành công');
     }
     showForm.value = false;
-    await fetchAuthors();
+    await fetchAuthors(pagination.value.page);
   } catch (err) {
     formError.value = err.response?.data?.message || 'Lưu tác giả thất bại';
   } finally {
@@ -67,111 +91,112 @@ async function submitForm() {
   }
 }
 
-async function handleDelete(author) {
-  if (!confirm(`Xóa tác giả "${author.name}"?`)) return;
+function askDelete(author) {
+  confirmDelete.value = { show: true, author };
+}
+
+async function confirmDeleteAuthor() {
+  const author = confirmDelete.value.author;
+  confirmDelete.value = { show: false, author: null };
   errorMessage.value = '';
   try {
     await authorService.deleteAuthor(author.id);
-    await fetchAuthors();
+    showToast('Đã xóa tác giả');
+    await fetchAuthors(pagination.value.page);
   } catch (err) {
     // Trường hợp phổ biến nhất: 409 AUTHOR_HAS_BOOKS (còn sách của tác giả này, không cho xóa)
     errorMessage.value = err.response?.data?.message || 'Xóa tác giả thất bại';
   }
 }
 
-onMounted(fetchAuthors);
+onMounted(() => fetchAuthors(1));
 </script>
 
 <template>
-  <div class="author-manage">
+  <div>
     <h1>Quản lý tác giả</h1>
 
-    <button @click="openCreateForm">+ Thêm tác giả</button>
+    <div class="mt-4 flex flex-wrap gap-3">
+      <input
+        v-model="keyword"
+        type="text"
+        placeholder="Tìm theo tên tác giả..."
+        class="min-h-[44px] flex-1 rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        @input="onKeywordInput"
+      />
+      <BaseButton @click="openCreateForm">+ Thêm tác giả</BaseButton>
+    </div>
 
-    <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+    <p v-if="errorMessage" class="mt-4 text-sm text-danger">{{ errorMessage }}</p>
 
-    <div v-if="showForm" class="form-box">
+    <div v-if="showForm" class="mt-4 max-w-md rounded-lg bg-surface p-5 shadow-sm">
       <h3>{{ editingId ? 'Sửa tác giả' : 'Thêm tác giả' }}</h3>
-      <div class="form-group">
-        <label>Tên</label>
-        <input v-model="form.name" type="text" />
+      <div class="mt-3 flex flex-col gap-3">
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Tên</label>
+          <input
+            v-model="form.name"
+            type="text"
+            class="min-h-[44px] rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          />
+        </div>
+        <div class="flex flex-col gap-1">
+          <label class="text-sm font-medium text-text-primary">Tiểu sử</label>
+          <textarea
+            v-model="form.bio"
+            rows="2"
+            class="rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          ></textarea>
+        </div>
       </div>
-      <div class="form-group">
-        <label>Tiểu sử</label>
-        <textarea v-model="form.bio" rows="2"></textarea>
-      </div>
-      <p v-if="formError" class="error">{{ formError }}</p>
-      <div class="form-actions">
-        <button :disabled="submitting" @click="submitForm">{{ submitting ? 'Đang lưu...' : 'Lưu' }}</button>
-        <button type="button" @click="cancelForm">Hủy</button>
+      <p v-if="formError" class="mt-3 text-sm text-danger">{{ formError }}</p>
+      <div class="mt-4 flex gap-2">
+        <BaseButton :loading="submitting" @click="submitForm">{{ submitting ? 'Đang lưu...' : 'Lưu' }}</BaseButton>
+        <BaseButton variant="secondary" type="button" @click="cancelForm">Hủy</BaseButton>
       </div>
     </div>
 
-    <p v-if="loading">Đang tải...</p>
-    <table v-else>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Tên</th>
-          <th>Tiểu sử</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="author in authors" :key="author.id">
-          <td>{{ author.id }}</td>
-          <td>{{ author.name }}</td>
-          <td>{{ author.bio }}</td>
-          <td>
-            <button @click="openEditForm(author)">Sửa</button>
-            <button @click="handleDelete(author)">Xóa</button>
-          </td>
-        </tr>
-      </tbody>
-    </table>
+    <p v-if="loading" class="mt-4 text-sm text-text-secondary">Đang tải...</p>
+    <template v-else>
+      <div class="mt-4 overflow-x-auto rounded-lg bg-surface shadow-sm">
+        <table class="w-full border-collapse text-sm">
+          <thead>
+            <tr class="border-b border-border bg-background text-xs uppercase text-text-secondary">
+              <th class="px-3 py-2 text-left">ID</th>
+              <th class="px-3 py-2 text-left">Tên</th>
+              <th class="px-3 py-2 text-left">Tiểu sử</th>
+              <th class="px-3 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="author in authors" :key="author.id" class="border-b border-border hover:bg-background">
+              <td class="px-3 py-2">{{ author.id }}</td>
+              <td class="px-3 py-2">{{ author.name }}</td>
+              <td class="px-3 py-2">{{ author.bio }}</td>
+              <td class="px-3 py-2">
+                <div class="flex gap-3">
+                  <button type="button" class="text-primary hover:underline" @click="openEditForm(author)">Sửa</button>
+                  <button type="button" class="text-danger hover:underline" @click="askDelete(author)">Xóa</button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="authors.length === 0">
+              <td colspan="4" class="px-3 py-6 text-center text-text-secondary">Không tìm thấy tác giả nào.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <Pagination :current-page="pagination.page" :total-pages="pagination.total_pages" @change-page="goToPage" />
+    </template>
+
+    <ConfirmDialog
+      :show="confirmDelete.show"
+      title="Xóa tác giả"
+      :message="`Xóa tác giả “${confirmDelete.author?.name}”?`"
+      confirm-label="Xóa"
+      @confirm="confirmDeleteAuthor"
+      @cancel="confirmDelete.show = false"
+    />
   </div>
 </template>
-
-<style scoped>
-.author-manage {
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 16px;
-}
-.form-box {
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  padding: 16px;
-  margin: 16px 0;
-  max-width: 400px;
-}
-.form-group {
-  margin-bottom: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.form-actions {
-  display: flex;
-  gap: 8px;
-}
-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 16px;
-}
-th,
-td {
-  border: 1px solid #ddd;
-  padding: 8px;
-  text-align: left;
-  font-size: 14px;
-}
-button {
-  cursor: pointer;
-  margin-right: 4px;
-}
-.error {
-  color: #d33;
-}
-</style>

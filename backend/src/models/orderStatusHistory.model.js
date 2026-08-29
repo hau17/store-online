@@ -19,8 +19,9 @@ async function findById(id) {
   return rows[0];
 }
 
-async function create({ order_id, status, changed_by, note }) {
-  const [result] = await pool.execute(
+// conn (tùy chọn): dùng chung transaction với order.controller.js lúc checkout (bước g mục 6.7).
+async function create({ order_id, status, changed_by, note }, conn = pool) {
+  const [result] = await conn.execute(
     `INSERT INTO order_status_history (order_id, status, changed_by, note)
      VALUES (?, ?, ?, ?)`,
     [order_id, status, changed_by || 'system', note || null]

@@ -241,4 +241,12 @@ async function increaseStock(bookId, quantity, conn = pool) {
   await conn.execute('UPDATE books SET stock_quantity = stock_quantity + ? WHERE id = ?', [quantity, bookId]);
 }
 
-module.exports = { findAll, findById, create, update, softDelete, increaseStock };
+// Trừ tồn kho — CHỈ được gọi khi đơn hàng chuyển "paid" (business rule mục 9.3: đây là nguồn GIẢM
+// duy nhất của stock_quantity, đối xứng với increaseStock() ở trên là nguồn TĂNG duy nhất).
+// conn (tùy chọn): connection đang trong transaction của payment.controller.js (webhook SePay), để
+// nếu 1 trong các bước xác nhận thanh toán lỗi giữa chừng thì phần trừ tồn kho này cũng rollback theo.
+async function decreaseStock(bookId, quantity, conn = pool) {
+  await conn.execute('UPDATE books SET stock_quantity = stock_quantity - ? WHERE id = ?', [quantity, bookId]);
+}
+
+module.exports = { findAll, findById, create, update, softDelete, increaseStock, decreaseStock };

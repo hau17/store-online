@@ -3,6 +3,7 @@
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useAuthStore } from '../../stores/auth.store';
+import BaseButton from '../../components/common/BaseButton.vue';
 
 const router = useRouter();
 const authStore = useAuthStore();
@@ -36,57 +37,42 @@ async function handleSubmit() {
 </script>
 
 <template>
-  <div class="auth-page">
-    <h1>Đăng nhập</h1>
+  <div class="mx-auto max-w-sm px-4 py-12">
+    <h1 class="text-center">Đăng nhập</h1>
 
-    <form @submit.prevent="handleSubmit">
-      <div class="form-group">
-        <label for="email">Email</label>
-        <input id="email" v-model="email" type="email" placeholder="you@example.com" />
+    <form class="mt-6 flex flex-col gap-4" @submit.prevent="handleSubmit">
+      <div class="flex flex-col gap-1">
+        <label for="email" class="text-sm font-medium text-text-primary">Email</label>
+        <input
+          id="email"
+          v-model="email"
+          type="email"
+          placeholder="you@example.com"
+          class="min-h-[44px] rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        />
       </div>
 
-      <div class="form-group">
-        <label for="password">Mật khẩu</label>
-        <input id="password" v-model="password" type="password" placeholder="Mật khẩu" />
+      <div class="flex flex-col gap-1">
+        <label for="password" class="text-sm font-medium text-text-primary">Mật khẩu</label>
+        <input
+          id="password"
+          v-model="password"
+          type="password"
+          placeholder="Mật khẩu"
+          class="min-h-[44px] rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        />
       </div>
 
-      <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+      <p v-if="errorMessage" class="text-sm text-danger">{{ errorMessage }}</p>
 
-      <button type="submit" :disabled="loading">
+      <BaseButton type="submit" class="w-full" :loading="loading">
         {{ loading ? 'Đang đăng nhập...' : 'Đăng nhập' }}
-      </button>
+      </BaseButton>
     </form>
 
-    <p>
+    <p class="mt-4 text-center text-sm text-text-secondary">
       Chưa có tài khoản?
-      <router-link to="/register">Đăng ký</router-link>
+      <router-link to="/register" class="text-primary hover:underline">Đăng ký</router-link>
     </p>
   </div>
 </template>
-
-<style scoped>
-.auth-page {
-  max-width: 360px;
-  margin: 40px auto;
-  padding: 0 16px;
-}
-.form-group {
-  margin-bottom: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-input {
-  padding: 8px;
-  font-size: 14px;
-}
-button {
-  width: 100%;
-  padding: 8px;
-  cursor: pointer;
-}
-.error {
-  color: #d33;
-  font-size: 14px;
-}
-</style>

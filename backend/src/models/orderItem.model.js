@@ -16,6 +16,18 @@ async function findById(id) {
   return rows[0];
 }
 
+// Bulk insert toàn bộ dòng sách của 1 đơn hàng bằng 1 câu query (giống stockImportItem.model.js).
+// book_title/price phải được SNAPSHOT SẴN trong items trước khi gọi (business rule #2) — hàm này
+// chỉ lo phần ghi DB, không tự lấy giá hiện tại của book.
+// conn (tùy chọn): dùng chung transaction với order.controller.js lúc checkout.
+async function createMany(orderId, items, conn = pool) {
+  const values = items.map((item) => [orderId, item.book_id, item.book_title, item.quantity, item.price]);
+  await conn.query(
+    'INSERT INTO order_items (order_id, book_id, book_title, quantity, price) VALUES ?',
+    [values]
+  );
+}
+
 // book_title và price được snapshot tại thời điểm đặt hàng (xem business rule #2 trong spec)
 async function create({ order_id, book_id, book_title, quantity, price }) {
   const [result] = await pool.execute(
@@ -39,4 +51,4 @@ async function remove(id) {
   return result.affectedRows > 0;
 }
 
-module.exports = { findAll, findByOrderId, findById, create, update, remove };
+module.exports = { findAll, findByOrderId, findById, create, createMany, update, remove };
