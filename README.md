@@ -50,10 +50,9 @@ Website bán sách dành cho người đọc Việt Nam, gồm giao diện khác
 |---|---|
 | Backend | Node.js + Express.js |
 | Database | MySQL 8 |
-| ORM / Query | Sequelize (khuyến nghị) hoặc `mysql2` (raw query) |
+| ORM / Query | `mysql2` (raw query) |
 | Frontend | Vue 3 (Composition API) + Vue Router + Pinia |
 | CSS | Tailwind CSS |
-| Font | Google Fonts: `Lora` (tiêu đề) + `Be Vietnam Pro` (nội dung) |
 | Auth | JWT (`jsonwebtoken`) + `bcrypt` |
 | Realtime | Socket.io |
 | Thanh toán | SePay (webhook) + VietQR (tạo mã QR) |
