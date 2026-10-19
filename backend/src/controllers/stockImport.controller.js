@@ -1,9 +1,9 @@
-const pool = require('../config/db');
 const stockImportModel = require('../models/stockImport.model');
 const stockImportItemModel = require('../models/stockImportItem.model');
 const supplierModel = require('../models/supplier.model');
 const bookModel = require('../models/book.model');
 const generateImportCode = require('../utils/generateImportCode');
+const { withTransaction, retryOnDuplicateCode } = require('../utils/transaction');
 const { success, error } = require('../utils/response');
 
 // Validate TRƯỚC khi mở transaction (đọc dữ liệu thuần, không cần transaction) — kiểm tra supplier
@@ -75,47 +75,44 @@ async function createStockImport(req, res, next) {
     // nếu ghi phiếu nhập xong mà lỡ lỗi giữa chừng lúc cộng tồn kho (hoặc ngược lại), số liệu tồn kho
     // sẽ lệch khỏi thực tế mãi mãi vì không có cách nào tự phát hiện lại sau này. Transaction đảm bảo
     // hoặc ghi đủ cả phiếu nhập + chi tiết + tồn kho, hoặc không ghi gì cả (rollback sạch).
-    const conn = await pool.getConnection();
-    let importId;
-    try {
-      await conn.beginTransaction();
+    // Trùng import_code (2 request đồng thời) -> chạy lại cả transaction, tối đa 3 lần.
+    const importId = await retryOnDuplicateCode(
+      () =>
+        withTransaction(async (conn) => {
+          // a. Sinh import_code (xem giải thích race condition trong generateImportCode.js)
+          const importCode = await generateImportCode(conn);
 
-      // a. Sinh import_code duy nhất (xem giải thích race condition trong generateImportCode.js)
-      const importCode = await generateImportCode(conn);
+          // b. Tính total_amount = tổng (quantity × import_price) toàn bộ items
+          const totalAmount = normalizedItems.reduce((sum, item) => sum + item.quantity * item.import_price, 0);
 
-      // b. Tính total_amount = tổng (quantity × import_price) toàn bộ items
-      const totalAmount = normalizedItems.reduce(
-        (sum, item) => sum + item.quantity * item.import_price,
-        0
-      );
+          // c. Insert header phiếu nhập
+          const id = await stockImportModel.create(
+            {
+              import_code: importCode,
+              supplier_id,
+              created_by: req.user.id,
+              total_amount: totalAmount,
+              note,
+            },
+            conn
+          );
 
-      // c. Insert header phiếu nhập
-      importId = await stockImportModel.create(
-        {
-          import_code: importCode,
-          supplier_id,
-          created_by: req.user.id,
-          total_amount: totalAmount,
-          note,
-        },
-        conn
-      );
+          // d. Insert toàn bộ chi tiết (bulk insert 1 câu query)
+          await stockImportItemModel.createMany(id, normalizedItems, conn);
 
-      // d. Insert toàn bộ chi tiết (bulk insert 1 câu query)
-      await stockImportItemModel.createMany(importId, normalizedItems, conn);
+          // e. Cộng dồn tồn kho cho từng sách
+          for (const item of normalizedItems) {
+            await bookModel.increaseStock(item.book_id, item.quantity, conn);
+          }
 
-      // e. Cộng dồn tồn kho cho từng sách — nguồn TĂNG duy nhất của stock_quantity
-      for (const item of normalizedItems) {
-        await bookModel.increaseStock(item.book_id, item.quantity, conn);
+          return id;
+        }),
+      {
+        uniqueKey: 'import_code',
+        errorCode: 'IMPORT_CODE_CONFLICT',
+        message: 'Hệ thống đang bận, vui lòng thử lại',
       }
-
-      await conn.commit();
-    } catch (err) {
-      await conn.rollback();
-      throw err;
-    } finally {
-      conn.release();
-    }
+    );
 
     // Query lại SAU KHI commit để trả về đầy đủ thông tin (tên nhà cung cấp, tên sách từng dòng)
     // đúng response mẫu trong spec mục 6.10.

@@ -31,8 +31,9 @@ const routes = [
   { path: '/', name: 'home', component: Home },
   { path: '/books/:id', name: 'book-detail', component: BookDetail },
   // requiresAuth: cần đăng nhập (customer hoặc admin đều được), khác với requiresAdmin ở dưới
-  { path: '/cart', name: 'cart', component: Cart, meta: { requiresAuth: true } },
-  { path: '/checkout', name: 'checkout', component: Checkout, meta: { requiresAuth: true } },
+  // requiresCustomer: giỏ hàng/checkout chỉ dành cho role customer, admin bị đưa về trang quản trị
+  { path: '/cart', name: 'cart', component: Cart, meta: { requiresAuth: true, requiresCustomer: true } },
+  { path: '/checkout', name: 'checkout', component: Checkout, meta: { requiresAuth: true, requiresCustomer: true } },
   { path: '/orders', name: 'order-list', component: OrderList, meta: { requiresAuth: true } },
   { path: '/orders/:id', name: 'order-status', component: OrderStatus, meta: { requiresAuth: true } },
   { path: '/account', name: 'account', component: Account, meta: { requiresAuth: true } },
@@ -77,6 +78,7 @@ router.beforeEach((to) => {
 
   if (to.meta.requiresAuth) {
     if (!authStore.isLoggedIn) return { name: 'login' };
+    if (to.meta.requiresCustomer && authStore.isAdmin) return { name: 'admin-dashboard' };
     return true;
   }
 

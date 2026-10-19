@@ -138,6 +138,13 @@ async function findByOrderCode(orderCode) {
   return rows[0];
 }
 
+// Khóa dòng đơn hàng trong transaction (conn) trước khi đổi trạng thái — mọi luồng đổi trạng thái
+// (admin, khách hủy, webhook) đều phải đi qua đây để không có 2 luồng cùng xử lý 1 đơn song song.
+async function findByIdForUpdate(id, conn) {
+  const [rows] = await conn.execute('SELECT * FROM orders WHERE id = ? FOR UPDATE', [id]);
+  return rows[0];
+}
+
 async function updateStatus(id, status, conn = pool) {
   const [result] = await conn.execute('UPDATE orders SET status = ? WHERE id = ?', [status, id]);
   return result.affectedRows > 0;
@@ -154,4 +161,13 @@ async function remove(id) {
   return result.affectedRows > 0;
 }
 
-module.exports = { create, findByUserId, findById, findByOrderCode, updateStatus, getStatus, remove };
+module.exports = {
+  create,
+  findByUserId,
+  findById,
+  findByOrderCode,
+  findByIdForUpdate,
+  updateStatus,
+  getStatus,
+  remove,
+};

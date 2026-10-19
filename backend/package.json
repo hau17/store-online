@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
+    "migrate:v2": "node scripts/migrate-v2.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

@@ -2,6 +2,18 @@
 
 > Tài liệu này mô tả đầy đủ database, API, luồng nghiệp vụ và cấu trúc project để AI (hoặc dev) có thể code trực tiếp mà không cần hỏi lại. Mọi endpoint đều có request/response mẫu cụ thể.
 
+> **Thay đổi ở bản cập nhật này (v2)** — sửa các điểm chưa hợp lý về tồn kho, hủy đơn và vận hành:
+> 1. **Đơn COD** không còn đi qua `paid`: admin xác nhận đơn COD bằng cách chuyển thẳng `pending → processing`, tồn kho bị trừ tại bước này (mục 6.7).
+> 2. Gom logic trừ/hoàn kho thành 2 thao tác dùng chung **"Trừ kho đơn hàng"** và **"Hoàn kho đơn hàng"** (mục 6.7.1). Trừ kho khi đơn được xác nhận (`paid` với chuyển khoản, `processing` với COD); hoàn kho khi đơn **đã trừ kho** bị hủy hoặc giao không thành công.
+> 3. Bổ sung `processing → cancelled` và quy định hủy đơn đã trừ kho thì phải hoàn kho + bắt buộc có lý do.
+> 4. Hủy đơn `pending` (khách hoặc admin) phải cập nhật `payments.status = 'cancelled'` và emit socket.
+> 5. Webhook và xác nhận thủ công phải **khóa dòng sách (`SELECT ... FOR UPDATE`) và kiểm tra lại tồn kho** trước khi trừ, chống bán âm kho. Thêm `CHECK (stock_quantity >= 0)`.
+> 6. Webhook nhận đủ tiền nhưng thiếu hàng: ghi nhận tiền (`payments.success`) nhưng giữ đơn `pending` để admin xử lý; webhook bỏ qua nếu payment đã `success` (chống xử lý trùng).
+> 7. Sinh `order_code`/`import_code` phải tự thử lại khi trùng mã (tối đa 3 lần).
+> 8. Giỏ hàng và tạo đơn chỉ dành cho `role = customer`.
+> 9. Lưu lý do khóa tài khoản vào DB (`users.locked_reason`, `users.locked_at`).
+> 10. `order_status_history.changed_by` thêm giá trị `'customer'`; `payments.status` thêm giá trị `'cancelled'`.
+
 ---
 
 ## 1. Tech Stack
@@ -74,6 +86,7 @@ project-root/
 │   │   ├── middlewares/
 │   │   │   ├── auth.middleware.js     # verify JWT
 │   │   │   ├── admin.middleware.js    # check role admin
+│   │   │   ├── customer.middleware.js # v2: check role customer (giỏ hàng, tạo đơn)
 │   │   │   ├── error.middleware.js    # xử lý lỗi tập trung
 │   │   │   └── upload.middleware.js   # MỚI: cấu hình multer nhận file ảnh (memory storage)
 │   │   ├── sockets/
@@ -186,6 +199,8 @@ CREATE TABLE users (
     address VARCHAR(255),
     role ENUM('admin', 'customer') NOT NULL DEFAULT 'customer',
     is_active TINYINT(1) NOT NULL DEFAULT 1,
+    locked_reason VARCHAR(255) NULL,           -- v2: lý do khóa tài khoản (mục 6.11), NULL khi đang hoạt động
+    locked_at DATETIME NULL,                   -- v2: thời điểm khóa
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
@@ -233,7 +248,8 @@ CREATE TABLE books (
     FOREIGN KEY (category_id) REFERENCES categories(id),
     FOREIGN KEY (author_id) REFERENCES authors(id),
     FOREIGN KEY (publisher_id) REFERENCES publishers(id),
-    FULLTEXT KEY ft_title (title)              -- FULLTEXT chỉ còn trên title vì author giờ ở bảng khác
+    FULLTEXT KEY ft_title (title),             -- FULLTEXT chỉ còn trên title vì author giờ ở bảng khác
+    CONSTRAINT chk_books_stock_non_negative CHECK (stock_quantity >= 0)  -- v2: lưới an toàn chống âm kho (MySQL >= 8.0.16)
 );
 
 -- =========================
@@ -296,7 +312,7 @@ CREATE TABLE payments (
     gateway VARCHAR(50) NOT NULL DEFAULT 'sepay',
     gateway_transaction_id VARCHAR(100),
     transfer_content VARCHAR(255),
-    status ENUM('pending','success','failed') NOT NULL DEFAULT 'pending',
+    status ENUM('pending','success','failed','cancelled') NOT NULL DEFAULT 'pending',  -- v2: thêm 'cancelled' khi đơn bị hủy lúc chưa thanh toán
     raw_payload JSON,
     paid_at DATETIME,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -307,7 +323,7 @@ CREATE TABLE order_status_history (
     id INT AUTO_INCREMENT PRIMARY KEY,
     order_id INT NOT NULL,
     status VARCHAR(20) NOT NULL,
-    changed_by ENUM('system','admin') NOT NULL DEFAULT 'system',
+    changed_by ENUM('system','admin','customer') NOT NULL DEFAULT 'system',  -- v2: thêm 'customer' (khách tự hủy đơn)
     note VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE CASCADE
@@ -352,6 +368,23 @@ CREATE TABLE stock_import_items (
     FOREIGN KEY (stock_import_id) REFERENCES stock_imports(id) ON DELETE CASCADE,
     FOREIGN KEY (book_id) REFERENCES books(id)
 );
+```
+
+**Migration cho database đã tạo theo bản cũ (v1 → v2):**
+```sql
+ALTER TABLE users
+    ADD COLUMN locked_reason VARCHAR(255) NULL AFTER is_active,
+    ADD COLUMN locked_at DATETIME NULL AFTER locked_reason;
+
+ALTER TABLE payments
+    MODIFY status ENUM('pending','success','failed','cancelled') NOT NULL DEFAULT 'pending';
+
+ALTER TABLE order_status_history
+    MODIFY changed_by ENUM('system','admin','customer') NOT NULL DEFAULT 'system';
+
+-- Kiểm tra trước: SELECT id, stock_quantity FROM books WHERE stock_quantity < 0; (phải sửa hết về >= 0 thì mới add được CHECK)
+ALTER TABLE books
+    ADD CONSTRAINT chk_books_stock_non_negative CHECK (stock_quantity >= 0);
 ```
 
 ---
@@ -639,6 +672,8 @@ Logic (transaction): `UPDATE book_images SET is_primary = 0 WHERE book_id = ?` (
 
 ### 6.6. Cart (`/api/cart`) — yêu cầu đăng nhập (role customer)
 
+> **v2 — bắt buộc kiểm tra role**: toàn bộ `/api/cart` và `POST /api/orders` phải chạy thêm `customer.middleware.js` (sau `auth.middleware`) — nếu `req.user.role !== 'customer'` thì trả `403` `error_code: "CUSTOMER_ONLY"`. Admin không có giỏ hàng và không tự tạo đơn. Phía FE, ẩn icon giỏ hàng/nút "Thêm vào giỏ" khi đang đăng nhập bằng admin.
+
 | Method | Endpoint | Mô tả |
 |---|---|---|
 | GET | `/api/cart` | Lấy giỏ hàng của user hiện tại |
@@ -685,7 +720,7 @@ Logic xử lý (transaction):
 1. Lấy toàn bộ `cart_items` của user, nếu rỗng → trả lỗi `400`.
 2. Kiểm tra `stock_quantity` từng sách còn đủ không.
 3. Tính `total_amount`.
-4. Sinh `order_code` duy nhất — format: `DH` + `YYYYMMDD` + số thứ tự 3 chữ số, vd `DH20260814001`.
+4. Sinh `order_code` duy nhất — format: `DH` + `YYYYMMDD` + số thứ tự 3 chữ số, vd `DH20260814001`. **v2**: cách sinh `COUNT(*) + 1` có thể trùng khi 2 request đồng thời (cột có UNIQUE nên insert sau sẽ lỗi `ER_DUP_ENTRY`). Khi gặp lỗi trùng mã, rollback và **tự chạy lại toàn bộ transaction tối đa 3 lần**; hết 3 lần vẫn trùng thì trả `409` `error_code: "ORDER_CODE_CONFLICT"` với message "Hệ thống đang bận, vui lòng thử lại". Áp dụng y hệt cho `import_code` (mục 6.10, `error_code: "IMPORT_CODE_CONFLICT"`).
 5. Insert vào `orders` (status = `pending`).
 6. Insert từng dòng vào `order_items` (snapshot `title`, `price` tại thời điểm mua).
 7. Insert `order_status_history` (`status = 'pending'`, `changed_by = 'system'`).
@@ -744,27 +779,77 @@ Request:
 ```json
 { "status": "shipping", "note": "Đã giao cho đơn vị vận chuyển" }
 ```
-Logic: chỉ cho phép chuyển trạng thái theo đúng thứ tự cho phép — dùng 1 map định nghĩa các bước chuyển hợp lệ, KHÔNG hardcode if-else:
+Logic: chỉ cho phép chuyển trạng thái theo đúng thứ tự cho phép — dùng 1 map định nghĩa các bước chuyển hợp lệ **theo từng `payment_method`**, KHÔNG hardcode if-else:
 ```
-pending      → paid | cancelled
-paid         → processing | cancelled
-processing   → shipping
-shipping     → completed | delivery_failed
-completed    → (kết thúc, không chuyển tiếp)
-cancelled    → (kết thúc)
-delivery_failed → (kết thúc — xem ghi chú xử lý riêng bên dưới)
+                  bank_transfer                     cod
+pending      →    paid | cancelled                  processing | cancelled
+paid         →    processing | cancelled            (không dùng với COD)
+processing   →    shipping | cancelled              shipping | cancelled
+shipping     →    completed | delivery_failed       completed | delivery_failed
+completed    →    (kết thúc)
+cancelled    →    (kết thúc)
+delivery_failed → (kết thúc)
 ```
-Không cho nhảy cóc hoặc quay lui ngoài các mũi tên trên. Insert thêm dòng vào `order_status_history` với `changed_by = 'admin'`.
+Gợi ý cấu trúc map (backend `VALID_TRANSITIONS` và FE `ORDER_STATUS_FLOW` phải giống hệt nhau):
+```js
+const VALID_TRANSITIONS = {
+  bank_transfer: {
+    pending: ['paid', 'cancelled'],
+    paid: ['processing', 'cancelled'],
+    processing: ['shipping', 'cancelled'],
+    shipping: ['completed', 'delivery_failed'],
+    completed: [], cancelled: [], delivery_failed: [],
+  },
+  cod: {
+    pending: ['processing', 'cancelled'],
+    processing: ['shipping', 'cancelled'],
+    shipping: ['completed', 'delivery_failed'],
+    completed: [], cancelled: [], delivery_failed: [],
+  },
+};
+```
+Không cho nhảy cóc hoặc quay lui ngoài các mũi tên trên. Mọi lần chuyển đều insert `order_status_history` với `changed_by = 'admin'` và emit socket `order:status_updated` tới khách.
 
-**Trường hợp `shipping → delivery_failed`** (khách không nhận hàng/từ chối nhận khi giao) — ĐÂY LÀ TRƯỜNG HỢP ĐẶC BIỆT DUY NHẤT NGOÀI WEBHOOK ĐƯỢC PHÉP ĐỔI `stock_quantity`, xử lý trong 1 **transaction**:
-1. Update `orders.status = 'delivery_failed'`.
-2. Lấy `order_items` của đơn, với từng dòng: `UPDATE books SET stock_quantity = stock_quantity + quantity` (hoàn lại đúng số lượng đã trừ lúc đơn chuyển `paid`).
-3. Insert `order_status_history` (`status = 'delivery_failed'`, `changed_by = 'admin'`, note bắt buộc phải có lý do, ví dụ "Khách không nhận hàng").
-4. Emit socket `order:status_updated` tới khách như bình thường.
+> **Lý do COD bỏ qua `paid`**: với COD, khách chưa trả tiền khi admin xác nhận đơn, nên gắn nhãn "Đã thanh toán" là sai nghĩa. Admin xác nhận đơn COD bằng cách chuyển thẳng sang `processing` ("Đang chuẩn bị"). Tiền COD coi như thu khi đơn `completed` (không tạo bản ghi `payments` cho COD trong phạm vi bản này).
 
-Với các trường hợp chuyển trạng thái khác (không phải `delivery_failed`), giữ nguyên logic cũ: chỉ update `orders.status` + insert history + emit socket, KHÔNG đụng vào `stock_quantity`.
+#### 6.7.1. Quy tắc trừ kho / hoàn kho theo trạng thái — MỚI (v2)
+
+Định nghĩa: một đơn **"đã trừ kho"** khi trạng thái hiện tại thuộc `paid`, `processing`, `shipping`, `completed` (tức là đã đi qua bước xác nhận).
+
+| Bước chuyển | Áp dụng cho | Tác động tồn kho | Ghi chú |
+|---|---|---|---|
+| `pending → paid` | bank_transfer (webhook hoặc admin xác nhận thủ công) | **Trừ kho đơn hàng** | Xem mục 6.8 và mục "Admin xác nhận thanh toán thủ công" bên dưới |
+| `pending → processing` | cod | **Trừ kho đơn hàng** | Admin xác nhận đơn COD |
+| `pending → cancelled` | cả hai | Không đổi (chưa trừ) | `payments.status` đang `pending`/`failed` → `cancelled`. Nếu payment đã `success` (tiền về nhưng thiếu hàng) thì giữ `success`, note bắt buộc ghi việc hoàn tiền thủ công |
+| `paid → cancelled`, `processing → cancelled` | cả hai | **Hoàn kho đơn hàng** | Note (lý do) bắt buộc. Đơn chuyển khoản đã nhận tiền → admin hoàn tiền thủ công ngoài hệ thống, ghi rõ trong note |
+| `shipping → delivery_failed` | cả hai | **Hoàn kho đơn hàng** | Note (lý do) bắt buộc |
+| Các bước còn lại | | Không đổi | |
+
+**Thao tác "Trừ kho đơn hàng"** (luôn chạy BÊN TRONG transaction của bước chuyển trạng thái):
+1. Lấy `order_items` của đơn.
+2. Khóa các dòng sách liên quan: `SELECT id, title, stock_quantity FROM books WHERE id IN (...) FOR UPDATE` — chặn 2 transaction cùng trừ 1 sách song song.
+3. Nếu có sách nào `stock_quantity < quantity` của đơn → **ném lỗi `409` `error_code: "INSUFFICIENT_STOCK"`** (message nêu tên sách và số còn lại), rollback toàn bộ transaction. Không bao giờ trừ ra số âm.
+4. Đủ hàng → `UPDATE books SET stock_quantity = stock_quantity - ? WHERE id = ?` cho từng dòng.
+
+Lý do: lúc tạo đơn (6.7 bước 2) chỉ *kiểm tra* tồn kho chứ không giữ hàng, nên nhiều đơn `pending` có thể cùng "nhắm" vào những cuốn cuối cùng. Phải kiểm tra lại ở thời điểm trừ thật.
+
+**Thao tác "Hoàn kho đơn hàng"**: với từng dòng `order_items`, `UPDATE books SET stock_quantity = stock_quantity + quantity` (trong transaction). Chỉ được gọi khi đơn **đang ở trạng thái "đã trừ kho"** — không bao giờ hoàn kho cho đơn chưa trừ (tránh tồn kho bị cộng khống).
+
+Mọi bước chuyển có tác động tồn kho đều xử lý trong **1 transaction** gồm: update `orders.status` → trừ/hoàn kho → (nếu có) update `payments` → insert `order_status_history`. Emit socket chỉ sau khi commit.
+
+#### Admin xác nhận thanh toán thủ công (`pending → paid`, chỉ bank_transfer)
+Dùng khi webhook không tự xác nhận được (khách ghi sai nội dung, chuyển lệch tiền rồi bù, webhook báo thiếu hàng đã được nhập bổ sung...). Admin phải đối soát sao kê ngân hàng trước khi bấm. Request bắt buộc có `note` (vd "Đã đối soát sao kê, mã GD FT26041234567"). Xử lý trong transaction: update đơn `paid` → **Trừ kho đơn hàng** → update `payments` của đơn thành `success`, `paid_at = now()` (nếu chưa `success`) → insert history (`changed_by = 'admin'`). Nếu thiếu hàng → `409 INSUFFICIENT_STOCK`, admin cần nhập hàng trước hoặc hủy đơn.
 
 #### DELETE `/api/orders/:id` — Hủy đơn (chỉ khi status = `pending`)
+Khách tự hủy đơn của mình (admin muốn hủy thì dùng `PUT /api/orders/:id/status` với `status = 'cancelled'`). Xử lý trong transaction:
+1. Kiểm tra quyền sở hữu (`403` nếu không phải chủ đơn) và `status = 'pending'` (`400 CANNOT_CANCEL` nếu không).
+2. **v2 — chặn hủy khi tiền đã về**: nếu đơn có `payments.status = 'success'` (webhook đã nhận đủ tiền nhưng đơn còn `pending` do thiếu hàng, xem 6.8) → trả `400` `error_code: "PAYMENT_RECEIVED"`, message "Đơn đã nhận thanh toán, vui lòng liên hệ cửa hàng để được hỗ trợ hoàn tiền".
+3. Update `orders.status = 'cancelled'`.
+4. Nếu có bản ghi `payments` đang `pending` → update thành `cancelled`.
+5. Insert `order_status_history` (`status = 'cancelled'`, `changed_by = 'customer'`, note "Khách hàng tự hủy đơn").
+6. Sau commit: emit `order:status_updated` tới chính khách (để các tab khác đang mở cũng cập nhật).
+
+Không đụng tồn kho (đơn `pending` chưa trừ kho).
 
 ---
 
@@ -791,15 +876,14 @@ Logic xử lý:
 2. Nếu `transferType !== 'in'` → bỏ qua, trả `200` (không phải tiền vào thì không quan tâm).
 3. Regex tìm order_code trong `content`: `/DH\d{11}/` (khớp với format `DH20260814001`).
 4. Nếu không tìm thấy mã hợp lệ → log lại giao dịch để admin tự đối chiếu thủ công, vẫn trả `200` cho SePay (tránh SePay retry liên tục).
-5. Tìm `order` theo `order_code`. Nếu không tồn tại hoặc `status !== 'pending'` → log lại, trả `200`.
-6. So khớp `transferAmount === orders.total_amount`. Nếu không khớp → đánh dấu `payments.status = 'failed'`, ghi chú lệch số tiền, KHÔNG tự động set `paid` (để admin xử lý tay).
-7. Nếu khớp: transaction cập nhật:
-   - `orders.status = 'paid'`
-   - `payments.status = 'success'`, `paid_at = now()`, `gateway_transaction_id = referenceCode`, `transfer_content = content`, `raw_payload = <toàn bộ payload>`
-   - Trừ `stock_quantity` của từng sách trong `order_items`
-   - Insert `order_status_history` (`status = 'paid'`, `changed_by = 'system'`, note = "Xác nhận qua SePay webhook")
-8. Emit socket event `order:paid` tới đúng `user_id` của đơn hàng đó, kèm `order_id`.
-9. Trả `200 OK` cho SePay (luôn trả 200 nếu request hợp lệ về mặt xác thực, để tránh SePay retry vô ích).
+5. Tìm `order` theo `order_code`. Nếu không tồn tại → log lại, trả `200`. Nếu `status !== 'pending'` → log lại, trả `200`; **riêng trường hợp đơn đã `cancelled`** thì log ở mức cảnh báo rõ ràng "Nhận tiền cho đơn đã hủy — cần hoàn tiền thủ công" kèm `referenceCode`, số tiền.
+6. **v2 — chống xử lý trùng**: nếu `payments` của đơn đã `status = 'success'` (lần gọi trước đã ghi nhận tiền) → bỏ qua, trả `200`.
+7. So khớp `transferAmount === orders.total_amount` (ép cả 2 vế về Number). Nếu không khớp → đánh dấu `payments.status = 'failed'`, lưu `raw_payload`, ghi chú lệch số tiền, KHÔNG tự động set `paid` (admin đối soát rồi xác nhận thủ công — mục 6.7).
+8. Nếu khớp: mở transaction:
+   - Thực hiện **"Trừ kho đơn hàng"** (mục 6.7.1: khóa dòng `FOR UPDATE`, kiểm tra đủ hàng).
+   - **Nếu đủ hàng**: `orders.status = 'paid'`; `payments.status = 'success'`, `paid_at = now()`, `gateway_transaction_id = referenceCode`, `transfer_content = content`, `raw_payload = <toàn bộ payload>`; insert `order_status_history` (`status = 'paid'`, `changed_by = 'system'`, note = "Xác nhận qua SePay webhook"); commit → emit `order:paid`.
+   - **v2 — nếu thiếu hàng** (`INSUFFICIENT_STOCK`): rollback phần trừ kho, sau đó (transaction mới) chỉ cập nhật `payments.status = 'success'` + các trường giao dịch như trên (tiền đã thực sự về tài khoản, phải ghi nhận), **giữ đơn ở `pending`**, insert `order_status_history` (`status = 'pending'`, `changed_by = 'system'`, note = "Đã nhận đủ tiền nhưng thiếu hàng: <tên sách>"). Không emit `order:paid`. Admin sẽ nhập thêm hàng rồi xác nhận thủ công `pending → paid`, hoặc hủy đơn và hoàn tiền.
+9. Trả `200 OK` cho SePay (luôn trả 200 nếu request hợp lệ về mặt xác thực, kể cả lỗi xử lý phía server — đã log lại — để tránh SePay retry vô ích).
 
 Response cho SePay:
 ```json
@@ -863,7 +947,7 @@ Request:
 
 Logic xử lý (transaction):
 1. Validate: `supplier_id` tồn tại, `items` không rỗng, mỗi `book_id` tồn tại, `quantity > 0`, `import_price >= 0`.
-2. Sinh `import_code` duy nhất — format: `PN` + `YYYYMMDD` + số thứ tự 3 chữ số, vd `PN20260815001`.
+2. Sinh `import_code` duy nhất — format: `PN` + `YYYYMMDD` + số thứ tự 3 chữ số, vd `PN20260815001`. Gặp trùng mã thì rollback và chạy lại transaction tối đa 3 lần (giống `order_code`, mục 6.7 bước 4), hết lượt trả `409 IMPORT_CODE_CONFLICT`.
 3. Tính `total_amount = Σ (quantity × import_price)`.
 4. Insert 1 dòng `stock_imports` (`created_by` lấy từ `req.user.id` — admin đang đăng nhập).
 5. Insert từng dòng vào `stock_import_items`.
@@ -922,6 +1006,8 @@ Response mẫu:
         "email": "a@example.com",
         "phone": "0900000000",
         "is_active": true,
+        "locked_reason": null,
+        "locked_at": null,
         "total_orders": 3,
         "created_at": "2026-08-01T10:00:00.000Z"
       }
@@ -937,10 +1023,10 @@ Request (không bắt buộc):
 ```json
 { "reason": "Vi phạm chính sách đặt hàng nhiều lần không nhận" }
 ```
-Logic: set `is_active = 0`. Không cho khóa tài khoản có `role = 'admin'` (kể cả chính mình) — trả `400` `error_code: "CANNOT_LOCK_ADMIN"` nếu cố khóa 1 admin khác. Sau khi bị khóa, người dùng đó không đăng nhập được nữa (chặn ở bước login, mục 6.1) — token cũ nếu còn hạn vẫn dùng được cho tới khi hết hạn (giới hạn đã biết của JWT stateless, xem business rule số 8).
+Logic: set `is_active = 0`, `locked_reason = reason` (NULL nếu không nhập, cắt tối đa 255 ký tự), `locked_at = NOW()` (v2 — lưu DB thay vì chỉ log console, để admin tra lại được lý do; `GET /api/users` và `GET /api/users/:id` trả kèm 2 field này). Không cho khóa tài khoản có `role = 'admin'` (kể cả chính mình) — trả `400` `error_code: "CANNOT_LOCK_ADMIN"` nếu cố khóa 1 admin khác. Sau khi bị khóa, người dùng đó không đăng nhập được nữa (chặn ở bước login, mục 6.1) — token cũ nếu còn hạn vẫn dùng được cho tới khi hết hạn (giới hạn đã biết của JWT stateless, xem business rule số 8).
 
 #### PUT `/api/users/:id/unlock`
-Logic: set `is_active = 1`.
+Logic: set `is_active = 1`, `locked_reason = NULL`, `locked_at = NULL`.
 
 ---
 
@@ -949,7 +1035,7 @@ Logic: set `is_active = 1`.
 | Event | Hướng | Payload | Mô tả |
 |---|---|---|---|
 | `order:paid` | Server → Client | `{ order_id, order_code, status: "paid" }` | Bắn khi webhook xác nhận thanh toán thành công |
-| `order:status_updated` | Server → Client | `{ order_id, status }` | Bắn khi admin đổi trạng thái đơn |
+| `order:status_updated` | Server → Client | `{ order_id, status }` | Bắn khi admin đổi trạng thái đơn, hoặc khi khách tự hủy đơn (v2) |
 
 Client (Vue) join room theo `user_id` sau khi login: `socket.emit('join', userId)`. Server join socket vào room `user_${userId}`, khi cần emit thì `io.to('user_' + userId).emit(...)`.
 
@@ -961,25 +1047,31 @@ Client (Vue) join room theo `user_id` sau khi login: `socket.emit('join', userId
 
 **`admin.middleware.js`**: chạy sau `auth.middleware` → kiểm tra `req.user.role === 'admin'` → nếu không trả `403`.
 
+**`customer.middleware.js`** (v2): chạy sau `auth.middleware` → kiểm tra `req.user.role === 'customer'` → nếu không trả `403` `error_code: "CUSTOMER_ONLY"`. Gắn cho toàn bộ `/api/cart` và `POST /api/orders`.
+
 ---
 
 ## 9. Business Rules quan trọng (AI cần tuân thủ khi code)
 
 1. Password luôn hash bằng bcrypt, không bao giờ trả `password` trong bất kỳ response nào.
 2. `order_items.price` và `book_title` luôn snapshot tại thời điểm đặt hàng — không join sang `books` để lấy giá hiện tại khi hiển thị lịch sử đơn cũ.
-3. **`stock_quantity` của `books` chỉ được phép thay đổi qua đúng 3 nguồn**:
+3. **`stock_quantity` của `books` chỉ được phép thay đổi qua đúng các nguồn sau** (chi tiết ở mục 6.7.1):
    - **Tăng (+)**: khi tạo phiếu nhập hàng thành công (mục 6.10).
-   - **Tăng (+)**: khi đơn hàng chuyển sang `delivery_failed` — hoàn lại số lượng đã trừ trước đó (mục 6.7).
-   - **Giảm (-)**: khi đơn hàng chuyển sang trạng thái `paid` (mục 6.8, hoặc khi admin xác nhận `paid` thủ công nếu có).
+   - **Giảm (-) — "Trừ kho đơn hàng"**: khi đơn được xác nhận — `pending → paid` (chuyển khoản, qua webhook mục 6.8 hoặc admin xác nhận thủ công) hoặc `pending → processing` (COD).
+   - **Tăng (+) — "Hoàn kho đơn hàng"**: khi đơn **đã trừ kho** bị hủy (`paid → cancelled`, `processing → cancelled`) hoặc giao không thành công (`shipping → delivery_failed`).
+   Trừ kho bắt buộc khóa dòng sách (`SELECT ... FOR UPDATE`) và kiểm tra đủ hàng ngay tại thời điểm trừ; không bao giờ để `stock_quantity < 0` (có thêm `CHECK` ở DB làm lưới an toàn). Hoàn kho chỉ áp dụng cho đơn đã trừ kho.
    API `POST /api/books` và `PUT /api/books/:id` **không được đọc hay set trực tiếp** field `stock_quantity` từ request body, kể cả khi client cố tình gửi kèm — sách mới luôn khởi tạo `stock_quantity = 0`.
-4. Toàn bộ thao tác tạo đơn hàng (mục 6.7), xử lý webhook (mục 6.8), tạo phiếu nhập hàng (mục 6.10), và chuyển trạng thái đơn sang `delivery_failed` (mục 6.7) phải dùng **database transaction** để đảm bảo toàn vẹn dữ liệu (rollback nếu có lỗi giữa chừng) — đặc biệt vì các thao tác này đều vừa ghi nhiều bảng vừa cập nhật `stock_quantity`.
+4. Các thao tác sau phải dùng **database transaction** (rollback nếu có lỗi giữa chừng): tạo đơn hàng (mục 6.7), xử lý webhook (mục 6.8), tạo phiếu nhập hàng (mục 6.10), hủy đơn (mục 6.7), và **mọi bước chuyển trạng thái có trừ/hoàn kho** (mục 6.7.1). Socket chỉ emit sau khi commit. Tạo đơn/phiếu nhập gặp trùng mã thì tự thử lại tối đa 3 lần.
 5. Webhook endpoint không được yêu cầu JWT của user (vì SePay gọi trực tiếp), nhưng bắt buộc phải verify bằng secret riêng.
-6. Trạng thái đơn hàng chỉ đi theo 1 chiều, dùng đúng bảng chuyển trạng thái đã định nghĩa ở mục 6.7 (`pending → paid/cancelled`, `paid → processing/cancelled`, `processing → shipping`, `shipping → completed/delivery_failed`). `completed`, `cancelled`, `delivery_failed` là các trạng thái kết thúc, không chuyển tiếp được nữa. Không cho phép set trạng thái tùy ý ngoài bảng này.
+6. Trạng thái đơn hàng chỉ đi theo 1 chiều, dùng đúng bảng chuyển trạng thái **theo `payment_method`** đã định nghĩa ở mục 6.7 (chuyển khoản: `pending → paid/cancelled`, `paid → processing/cancelled`; COD: `pending → processing/cancelled`; chung: `processing → shipping/cancelled`, `shipping → completed/delivery_failed`). `completed`, `cancelled`, `delivery_failed` là các trạng thái kết thúc, không chuyển tiếp được nữa. Không cho phép set trạng thái tùy ý ngoài bảng này. Hủy đơn đã trừ kho và chuyển `delivery_failed` bắt buộc có lý do (note).
 7. Không cho xóa `category`, `author`, `publisher` nếu còn `book` nào đang tham chiếu tới; không cho xóa `supplier` nếu còn `stock_import` nào tham chiếu tới — trả lỗi `409` với `error_code` tương ứng đã nêu ở từng mục.
 8. Đăng xuất xử lý hoàn toàn ở phía client (xóa token khỏi `localStorage` + reset Pinia store) — không có API endpoint, không có bảng dữ liệu phía server cho việc này (xem mục 6.1).
 9. Ảnh sách luôn lưu trên Cloudinary, KHÔNG lưu file trực tiếp trên ổ đĩa server. Khi xóa 1 ảnh (`DELETE /api/books/:id/images/:imageId`), bắt buộc phải gọi `cloudinary.uploader.destroy()` để xóa file thật trước, rồi mới xóa row trong `book_images` — tránh để lại ảnh rác trên Cloudinary không ai quản lý.
-10. Tài khoản bị khóa (`is_active = 0`) không đăng nhập được (chặn ở `POST /api/auth/login`, trả `403 ACCOUNT_LOCKED`) — nhưng token đã phát hành trước đó vẫn còn hiệu lực kỹ thuật cho tới khi hết hạn, vì hệ thống không dùng blacklist token (đúng rule số 8). Không cho khóa tài khoản có `role = 'admin'` qua API `/api/users/:id/lock` (mục 6.11).
+10. Tài khoản bị khóa (`is_active = 0`) không đăng nhập được (chặn ở `POST /api/auth/login`, trả `403 ACCOUNT_LOCKED`) — nhưng token đã phát hành trước đó vẫn còn hiệu lực kỹ thuật cho tới khi hết hạn, vì hệ thống không dùng blacklist token (đúng rule số 8). Không cho khóa tài khoản có `role = 'admin'` qua API `/api/users/:id/lock` (mục 6.11). Lý do và thời điểm khóa được lưu ở `users.locked_reason`, `users.locked_at`, xóa khi mở khóa.
 11. Mọi endpoint `GET` trả về danh sách đều phải tuân theo đúng quy ước phân trang chung ở mục 5 (`page`, `limit`, trả kèm object `pagination`) — không tạo ngoại lệ trả về nguyên mảng không phân trang, kể cả các module quản trị nội bộ như Categories, Authors, Publishers, Suppliers, Users.
+12. (v2) Giỏ hàng và tạo đơn chỉ dành cho `role = 'customer'` (`403 CUSTOMER_ONLY` với admin).
+13. (v2) Hủy đơn: khách chỉ tự hủy được đơn `pending` chưa nhận tiền (`payments.status !== 'success'`); hủy xong bản ghi `payments` đang chờ chuyển thành `cancelled`, lịch sử ghi `changed_by = 'customer'`, emit `order:status_updated`. Đơn đã nhận tiền mà bị hủy (bởi admin) thì phải hoàn tiền thủ công ngoài hệ thống và ghi rõ trong note.
+14. (v2) Webhook nhận đủ tiền nhưng thiếu hàng: ghi nhận `payments.success`, giữ đơn `pending`, ghi lịch sử nêu tên sách thiếu — không được trừ kho âm và không được bỏ qua việc ghi nhận tiền.
 
 ---
 

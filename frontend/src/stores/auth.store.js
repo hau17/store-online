@@ -66,6 +66,7 @@ export const useAuthStore = defineStore('auth', {
     // Không await fetchCart(): lỗi tải giỏ hàng không được phép làm hỏng luồng đăng nhập.
     _syncAfterLogin() {
       socket.emit('join', this.user.id);
+      if (this.user.role !== 'customer') return; // admin không có giỏ hàng (API trả 403 CUSTOMER_ONLY)
       useCartStore()
         .fetchCart()
         .catch((err) => console.error('Không tải được giỏ hàng:', err));

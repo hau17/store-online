@@ -10,9 +10,18 @@ async function findById(id) {
   return rows[0];
 }
 
-async function findByOrderId(orderId) {
-  const [rows] = await pool.execute('SELECT * FROM payments WHERE order_id = ?', [orderId]);
+async function findByOrderId(orderId, conn = pool) {
+  const [rows] = await conn.execute('SELECT * FROM payments WHERE order_id = ?', [orderId]);
   return rows[0];
+}
+
+// Đơn bị hủy khi chưa nhận tiền: payment đang chờ/lệch tiền -> 'cancelled'. Payment đã 'success'
+// (tiền đã về) giữ nguyên để còn đối soát hoàn tiền thủ công.
+async function cancelOpenByOrderId(orderId, conn = pool) {
+  await conn.execute(
+    "UPDATE payments SET status = 'cancelled' WHERE order_id = ? AND status IN ('pending', 'failed')",
+    [orderId]
+  );
 }
 
 // conn (tùy chọn): dùng chung transaction với order.controller.js lúc checkout (bước i mục 6.7).
@@ -84,4 +93,4 @@ async function updateStatus(id, { status, paid_at, gateway_transaction_id, trans
   return result.affectedRows > 0;
 }
 
-module.exports = { findAll, findById, findByOrderId, create, update, updateStatus, remove };
+module.exports = { findAll, findById, findByOrderId, cancelOpenByOrderId, create, update, updateStatus, remove };

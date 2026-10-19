@@ -128,7 +128,7 @@ async function findAllCustomers({ keyword, status, page = 1, limit = 10 } = {}) 
   const offset = (safePage - 1) * safeLimit;
 
   const [rows] = await pool.query(
-    `SELECT id, full_name, email, phone, address, is_active, created_at,
+    `SELECT id, full_name, email, phone, address, is_active, locked_reason, locked_at, created_at,
             (SELECT COUNT(*) FROM orders o WHERE o.user_id = users.id) AS total_orders
      FROM users
      ${whereSql}
@@ -142,7 +142,7 @@ async function findAllCustomers({ keyword, status, page = 1, limit = 10 } = {}) 
 
 async function findCustomerById(id) {
   const [rows] = await pool.execute(
-    `SELECT id, full_name, email, phone, address, is_active, created_at,
+    `SELECT id, full_name, email, phone, address, is_active, locked_reason, locked_at, created_at,
             (SELECT COUNT(*) FROM orders o WHERE o.user_id = users.id) AS total_orders
      FROM users
      WHERE id = ? AND role = 'customer'`,
@@ -151,13 +151,19 @@ async function findCustomerById(id) {
   return rows[0];
 }
 
-async function lockUser(id) {
-  const [result] = await pool.execute('UPDATE users SET is_active = 0 WHERE id = ?', [id]);
+async function lockUser(id, reason) {
+  const [result] = await pool.execute(
+    'UPDATE users SET is_active = 0, locked_reason = ?, locked_at = NOW() WHERE id = ?',
+    [reason || null, id]
+  );
   return result.affectedRows > 0;
 }
 
 async function unlockUser(id) {
-  const [result] = await pool.execute('UPDATE users SET is_active = 1 WHERE id = ?', [id]);
+  const [result] = await pool.execute(
+    'UPDATE users SET is_active = 1, locked_reason = NULL, locked_at = NULL WHERE id = ?',
+    [id]
+  );
   return result.affectedRows > 0;
 }
 

@@ -161,7 +161,9 @@ onMounted(() => fetchCustomers(1));
               <td class="px-3 py-2">{{ customer.email }}</td>
               <td class="px-3 py-2">{{ customer.phone }}</td>
               <td class="px-3 py-2">{{ customer.total_orders }}</td>
-              <td class="px-3 py-2"><StatusBadge :status="customer.is_active ? 'active' : 'locked'" /></td>
+              <td class="px-3 py-2" :title="customer.is_active ? undefined : customer.locked_reason || undefined">
+                <StatusBadge :status="customer.is_active ? 'active' : 'locked'" />
+              </td>
               <td class="px-3 py-2">{{ formatDate(customer.created_at) }}</td>
               <td class="px-3 py-2">
                 <button v-if="customer.is_active" type="button" class="text-danger hover:underline" @click="askLock(customer)">Khóa</button>
@@ -201,6 +203,12 @@ onMounted(() => fetchCustomers(1));
           <p class="text-[15px]"><strong>Địa chỉ:</strong> {{ detailCustomer.address || 'Chưa cập nhật' }}</p>
           <p class="text-[15px]"><strong>Số đơn đã đặt:</strong> {{ detailCustomer.total_orders }}</p>
           <p class="text-[15px]"><strong>Ngày tạo:</strong> {{ formatDate(detailCustomer.created_at) }}</p>
+          <template v-if="!detailCustomer.is_active">
+            <p v-if="detailCustomer.locked_at" class="text-[15px]">
+              <strong>Khóa lúc:</strong> {{ formatDate(detailCustomer.locked_at) }}
+            </p>
+            <p class="text-[15px]"><strong>Lý do khóa:</strong> {{ detailCustomer.locked_reason || 'Không ghi lý do' }}</p>
+          </template>
           <!-- Dùng tên khách làm keyword tìm trên OrderManage.vue (khớp shipping_name) — không phải
                lọc chính xác theo user_id vì backend hiện chỉ hỗ trợ tìm theo order_code/shipping_name. -->
           <router-link

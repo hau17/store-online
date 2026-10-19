@@ -232,21 +232,72 @@ async function softDelete(id) {
   return result.affectedRows > 0;
 }
 
-// Cộng dồn tồn kho — CHỈ được gọi khi tạo phiếu nhập hàng thành công (business rule mục 9.3:
-// stock_quantity chỉ tăng qua nhập hàng, giảm khi đơn hàng "paid", không nguồn nào khác được đổi).
-// conn (tùy chọn): connection đang trong transaction của stockImport.controller.js, để nếu 1 trong
-// các bước tạo phiếu nhập lỗi giữa chừng thì phần cộng tồn kho này cũng bị rollback theo, không để
-// tồn kho tăng "mồ côi" trong khi phiếu nhập lại không được ghi.
+// Cộng dồn tồn kho. Chỉ được gọi từ phiếu nhập hàng và restoreStockForOrder() bên dưới
+// (business rule mục 9.3). conn: connection đang trong transaction của nơi gọi.
 async function increaseStock(bookId, quantity, conn = pool) {
   await conn.execute('UPDATE books SET stock_quantity = stock_quantity + ? WHERE id = ?', [quantity, bookId]);
 }
 
-// Trừ tồn kho — CHỈ được gọi khi đơn hàng chuyển "paid" (business rule mục 9.3: đây là nguồn GIẢM
-// duy nhất của stock_quantity, đối xứng với increaseStock() ở trên là nguồn TĂNG duy nhất).
-// conn (tùy chọn): connection đang trong transaction của payment.controller.js (webhook SePay), để
-// nếu 1 trong các bước xác nhận thanh toán lỗi giữa chừng thì phần trừ tồn kho này cũng rollback theo.
-async function decreaseStock(bookId, quantity, conn = pool) {
-  await conn.execute('UPDATE books SET stock_quantity = stock_quantity - ? WHERE id = ?', [quantity, bookId]);
+// "Trừ kho đơn hàng" (spec mục 6.7.1) — gọi khi đơn được xác nhận (pending -> paid / processing).
+// BẮT BUỘC chạy trong transaction (conn): khóa các dòng sách bằng FOR UPDATE rồi mới kiểm tra số
+// lượng, để 2 đơn cùng xác nhận song song không cùng trừ vào những cuốn cuối cùng. Khóa theo thứ tự
+// id tăng dần để giảm nguy cơ deadlock. Thiếu hàng -> ném lỗi 409 INSUFFICIENT_STOCK TRƯỚC khi
+// update bất kỳ dòng nào, nên nơi gọi có thể bắt lỗi này mà không cần rollback phần đã trừ.
+// items: [{ book_id, book_title, quantity }] (order_items của đơn).
+async function deductStockForOrder(items, conn) {
+  const requiredByBook = new Map();
+  for (const item of items) {
+    requiredByBook.set(item.book_id, (requiredByBook.get(item.book_id) || 0) + item.quantity);
+  }
+  const bookIds = [...requiredByBook.keys()];
+  if (bookIds.length === 0) return;
+
+  const [rows] = await conn.query(
+    'SELECT id, title, stock_quantity FROM books WHERE id IN (?) ORDER BY id FOR UPDATE',
+    [bookIds]
+  );
+  const bookById = new Map(rows.map((row) => [row.id, row]));
+
+  const shortages = [];
+  for (const [bookId, required] of requiredByBook) {
+    const book = bookById.get(bookId);
+    const available = book ? book.stock_quantity : 0;
+    if (available < required) {
+      const title = book?.title || items.find((item) => item.book_id === bookId)?.book_title || `#${bookId}`;
+      shortages.push({ book_id: bookId, title, required, available });
+    }
+  }
+
+  if (shortages.length > 0) {
+    const err = new Error(
+      `Không đủ tồn kho: ${shortages.map((s) => `"${s.title}" còn ${s.available}/${s.required} cuốn`).join(', ')}`
+    );
+    err.statusCode = 409;
+    err.errorCode = 'INSUFFICIENT_STOCK';
+    err.shortages = shortages;
+    throw err;
+  }
+
+  for (const [bookId, required] of requiredByBook) {
+    await conn.execute('UPDATE books SET stock_quantity = stock_quantity - ? WHERE id = ?', [required, bookId]);
+  }
 }
 
-module.exports = { findAll, findById, create, update, softDelete, increaseStock, decreaseStock };
+// "Hoàn kho đơn hàng" (spec mục 6.7.1) — chỉ gọi cho đơn ĐANG ở trạng thái đã trừ kho
+// (paid/processing/shipping/completed), không bao giờ hoàn cho đơn chưa trừ.
+async function restoreStockForOrder(items, conn) {
+  for (const item of items) {
+    await increaseStock(item.book_id, item.quantity, conn);
+  }
+}
+
+module.exports = {
+  findAll,
+  findById,
+  create,
+  update,
+  softDelete,
+  increaseStock,
+  deductStockForOrder,
+  restoreStockForOrder,
+};

@@ -1,16 +1,28 @@
 <script setup>
 // Quản lý đơn hàng: danh sách toàn bộ đơn (all=true) + filter trạng thái/khoảng ngày/tìm kiếm +
 // phân trang + modal chi tiết với khu vực đổi trạng thái (chỉ hiện đúng các lựa chọn hợp lệ tiếp
-// theo, dùng chung map ORDER_STATUS_FLOW với backend để không hiển thị lựa chọn nào rồi bị backend
-// từ chối).
-import { ref, onMounted } from 'vue';
+// theo theo payment_method, dùng chung map ORDER_STATUS_FLOW với backend để không hiển thị lựa chọn
+// nào rồi bị backend từ chối).
+import { ref, computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import orderService from '../../services/order.service';
-import { ORDER_STATUS_FLOW, ORDER_STATUS_LABELS } from '../../utils/orderStatusFlow';
+import {
+  ORDER_STATUS_LABELS,
+  getNextStatuses,
+  isConfirmTransition,
+  isRestockTransition,
+} from '../../utils/orderStatusFlow';
 import { useToast } from '../../composables/useToast';
 import Pagination from '../../components/common/Pagination.vue';
 import StatusBadge from '../../components/common/StatusBadge.vue';
 import BaseButton from '../../components/common/BaseButton.vue';
+
+const PAYMENT_STATUS_LABELS = {
+  pending: 'Chờ thanh toán',
+  success: 'Đã nhận tiền',
+  failed: 'Lệch số tiền, cần đối soát',
+  cancelled: 'Đã hủy',
+};
 
 const route = useRoute();
 const { showToast } = useToast();
@@ -36,6 +48,41 @@ const newStatus = ref('');
 const statusNote = ref('');
 const updating = ref(false);
 const updateError = ref('');
+
+const nextStatuses = computed(() =>
+  detailOrder.value ? getNextStatuses(detailOrder.value.payment_method, detailOrder.value.status) : []
+);
+const paymentReceived = computed(() => detailOrder.value?.payment?.status === 'success');
+
+// Khớp đúng các trường hợp backend bắt buộc note (updateOrderStatus) để báo lỗi ngay phía client.
+const noteRequiredMessage = computed(() => {
+  if (!detailOrder.value || !newStatus.value) return '';
+  const current = detailOrder.value.status;
+  if (isRestockTransition(current, newStatus.value)) return 'Vui lòng nhập lý do (bắt buộc khi hoàn kho)';
+  if (newStatus.value === 'paid') return 'Vui lòng ghi chú kết quả đối soát (vd mã giao dịch ngân hàng)';
+  if (current === 'pending' && newStatus.value === 'cancelled' && paymentReceived.value) {
+    return 'Đơn đã nhận tiền — vui lòng ghi chú việc hoàn tiền cho khách';
+  }
+  return '';
+});
+
+const statusHint = computed(() => {
+  if (!detailOrder.value || !newStatus.value) return '';
+  const current = detailOrder.value.status;
+  if (isConfirmTransition(current, newStatus.value)) {
+    return 'Xác nhận đơn sẽ trừ tồn kho. Nếu không đủ hàng, hệ thống sẽ từ chối.';
+  }
+  if (isRestockTransition(current, newStatus.value)) {
+    return 'Hành động này sẽ hoàn lại số lượng tồn kho đã trừ trước đó.';
+  }
+  return '';
+});
+
+function statusOptionLabel(status) {
+  if (detailOrder.value?.status === 'pending' && status === 'paid') return 'Xác nhận đã nhận tiền (Đã thanh toán)';
+  if (detailOrder.value?.status === 'pending' && status === 'processing') return 'Xác nhận đơn COD (Đang chuẩn bị)';
+  return ORDER_STATUS_LABELS[status];
+}
 
 async function fetchOrders(page = 1) {
   loading.value = true;
@@ -107,10 +154,8 @@ async function submitStatusUpdate() {
     updateError.value = 'Vui lòng chọn trạng thái mới';
     return;
   }
-  // Khớp validate bắt buộc note ở backend khi chuyển sang delivery_failed — báo lỗi ngay phía
-  // client thay vì để request tự trả về 400 mới biết.
-  if (newStatus.value === 'delivery_failed' && !statusNote.value.trim()) {
-    updateError.value = 'Vui lòng nhập lý do khi chuyển sang "Giao không thành công"';
+  if (noteRequiredMessage.value && !statusNote.value.trim()) {
+    updateError.value = noteRequiredMessage.value;
     return;
   }
 
@@ -265,6 +310,14 @@ onMounted(() => fetchOrders(1));
           <p class="mt-3 text-[15px]"><strong>Người nhận:</strong> {{ detailOrder.shipping_name }} — {{ detailOrder.shipping_phone }}</p>
           <p class="text-[15px]"><strong>Địa chỉ:</strong> {{ detailOrder.shipping_address }}</p>
           <p v-if="detailOrder.note" class="text-[15px]"><strong>Ghi chú:</strong> {{ detailOrder.note }}</p>
+          <p class="text-[15px]">
+            <strong>Thanh toán:</strong>
+            {{ detailOrder.payment_method === 'bank_transfer' ? 'Chuyển khoản' : 'COD' }}
+            <span v-if="detailOrder.payment"> — {{ PAYMENT_STATUS_LABELS[detailOrder.payment.status] || detailOrder.payment.status }}</span>
+          </p>
+          <p v-if="detailOrder.status === 'pending' && paymentReceived" class="mt-2 rounded-lg bg-[#FEF3C7] p-3 text-sm text-warning">
+            Đã nhận đủ tiền nhưng thiếu hàng. Nhập thêm hàng rồi xác nhận thanh toán, hoặc hủy đơn và hoàn tiền cho khách.
+          </p>
 
           <h4 class="mt-4 font-display text-base font-semibold">Lịch sử trạng thái</h4>
           <ul class="mt-2 flex flex-col gap-2">
@@ -275,24 +328,22 @@ onMounted(() => fetchOrders(1));
             </li>
           </ul>
 
-          <div v-if="ORDER_STATUS_FLOW[detailOrder.status]?.length > 0" class="mt-4 flex flex-col items-start gap-3 border-t border-border pt-4">
+          <div v-if="nextStatuses.length > 0" class="mt-4 flex flex-col items-start gap-3 border-t border-border pt-4">
             <h4 class="font-display text-base font-semibold">Đổi trạng thái</h4>
             <select
               v-model="newStatus"
               class="min-h-[44px] w-full max-w-xs rounded-lg border border-border bg-surface px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
             >
               <option value="" disabled>-- Chọn trạng thái mới --</option>
-              <option v-for="s in ORDER_STATUS_FLOW[detailOrder.status]" :key="s" :value="s">
-                {{ ORDER_STATUS_LABELS[s] }}
+              <option v-for="s in nextStatuses" :key="s" :value="s">
+                {{ statusOptionLabel(s) }}
               </option>
             </select>
-            <p v-if="newStatus === 'delivery_failed'" class="text-sm text-warning">
-              ⚠ Hành động này sẽ hoàn lại số lượng tồn kho đã trừ trước đó. Bắt buộc nhập lý do bên dưới.
-            </p>
+            <p v-if="statusHint" class="text-sm text-warning">⚠ {{ statusHint }}</p>
             <input
               v-model="statusNote"
               type="text"
-              :placeholder="newStatus === 'delivery_failed' ? 'Lý do (bắt buộc)' : 'Ghi chú (không bắt buộc)'"
+              :placeholder="noteRequiredMessage ? 'Ghi chú / lý do (bắt buộc)' : 'Ghi chú (không bắt buộc)'"
               class="min-h-[44px] w-full max-w-xs rounded-lg border border-border px-3 py-2 text-[15px] focus:border-primary focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
             />
             <BaseButton :loading="updating" @click="submitStatusUpdate">

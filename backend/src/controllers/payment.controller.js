@@ -1,10 +1,10 @@
-const pool = require("../config/db");
 const env = require("../config/env");
 const orderModel = require("../models/order.model");
 const orderItemModel = require("../models/orderItem.model");
 const orderStatusHistoryModel = require("../models/orderStatusHistory.model");
 const paymentModel = require("../models/payment.model");
 const bookModel = require("../models/book.model");
+const { withTransaction } = require("../utils/transaction");
 const { emitToUser } = require("../sockets/orderSocket");
 const { success, error } = require("../utils/response");
 
@@ -58,56 +58,58 @@ async function handleSepayWebhook(req, res, next) {
     }
     const orderCode = match[0];
 
-    // d. Tìm order theo order_code — phải tồn tại VÀ đang "pending" mới xử lý tiếp (đơn đã paid rồi
-    // thì bỏ qua, tránh trừ tồn kho 2 lần nếu SePay lỡ gọi webhook trùng).
-    const order = await orderModel.findByOrderCode(orderCode);
-    if (!order) {
+    const found = await orderModel.findByOrderCode(orderCode);
+    if (!found) {
       console.warn(
         `[SePay webhook] Không tìm thấy đơn hàng với order_code=${orderCode}, cần đối chiếu thủ công.`,
       );
       return success(res, { message: "Không tìm thấy đơn hàng tương ứng" });
     }
-    if (order.status !== "pending") {
-      console.warn(
-        `[SePay webhook] Đơn ${orderCode} đang ở trạng thái "${order.status}" (không phải pending) — có thể đã xử lý rồi hoặc không còn chờ thanh toán. Bỏ qua.`,
-      );
-      return success(res, {
-        message: "Đơn hàng không ở trạng thái chờ thanh toán",
-      });
-    }
 
-    const payment = await paymentModel.findByOrderId(order.id);
+    // d-f. Toàn bộ xử lý trong 1 transaction có khóa dòng đơn hàng (findByIdForUpdate), để webhook
+    // gọi trùng / admin thao tác cùng lúc không xử lý 1 đơn 2 lần (business rule #4).
+    const outcome = await withTransaction(async (conn) => {
+      const order = await orderModel.findByIdForUpdate(found.id, conn);
 
-    // e. So khớp số tiền — total_amount là cột DECIMAL, mysql2 trả về dạng STRING, còn transferAmount
-    // từ JSON body là number -> phải Number() cả 2 vế trước khi so sánh, so sánh trực tiếp === giữa
-    // string và number sẽ LUÔN false dù giá trị thực chất bằng nhau.
-    const transferAmountNum = Number(transferAmount);
-    const totalAmountNum = Number(order.total_amount);
-    if (transferAmountNum !== totalAmountNum) {
-      if (payment) {
-        await paymentModel.updateStatus(payment.id, {
-          status: "failed",
-          raw_payload: req.body,
-        });
+      // d. Đơn phải còn "pending" mới xử lý tiếp
+      if (order.status !== "pending") {
+        if (order.status === "cancelled") {
+          console.warn(
+            `[SePay webhook] Nhận tiền cho đơn ĐÃ HỦY ${orderCode} — cần hoàn tiền thủ công. referenceCode=${referenceCode}, số tiền=${transferAmount}`,
+          );
+        } else {
+          console.warn(
+            `[SePay webhook] Đơn ${orderCode} đang ở trạng thái "${order.status}" (không phải pending). Bỏ qua.`,
+          );
+        }
+        return { result: "not_pending" };
       }
-      console.warn(
-        `[SePay webhook] Lệch số tiền — đơn ${orderCode} yêu cầu ${totalAmountNum} nhưng nhận được ${transferAmountNum}, cần admin đối chiếu thủ công.`,
-      );
-      return success(res, {
-        message: "Số tiền chuyển khoản không khớp, cần đối chiếu thủ công",
-      });
-    }
 
-    // f. Khớp tiền -> xác nhận thanh toán. TOÀN BỘ BƯỚC DƯỚI ĐÂY BỌC TRONG 1 TRANSACTION (business
-    // rule #4): đổi status đơn + payment + trừ tồn kho + ghi lịch sử phải cùng thành công hoặc cùng
-    // thất bại — nếu không rollback sạch, có thể xảy ra tình huống đơn đã "paid" (coi như đã nhận
-    // tiền) nhưng tồn kho không trừ, hoặc ngược lại, gây lệch dữ liệu thật không thể tự sửa lại.
-    const conn = await pool.getConnection();
-    try {
-      await conn.beginTransaction();
+      const payment = await paymentModel.findByOrderId(order.id, conn);
 
-      await orderModel.updateStatus(order.id, "paid", conn);
+      // Webhook gọi lặp sau khi đã ghi nhận tiền (vd lần trước thiếu hàng nên đơn vẫn pending)
+      if (payment?.status === "success") {
+        console.warn(`[SePay webhook] Đơn ${orderCode} đã ghi nhận thanh toán trước đó. Bỏ qua.`);
+        return { result: "already_recorded" };
+      }
 
+      // e. So khớp số tiền — total_amount (DECIMAL) mysql2 trả về STRING, transferAmount là number
+      // -> phải Number() cả 2 vế, so sánh === trực tiếp giữa string và number luôn false.
+      const transferAmountNum = Number(transferAmount);
+      const totalAmountNum = Number(order.total_amount);
+      if (transferAmountNum !== totalAmountNum) {
+        if (payment) {
+          await paymentModel.updateStatus(payment.id, { status: "failed", raw_payload: req.body }, conn);
+        }
+        console.warn(
+          `[SePay webhook] Lệch số tiền — đơn ${orderCode} yêu cầu ${totalAmountNum} nhưng nhận được ${transferAmountNum}, cần admin đối chiếu thủ công.`,
+        );
+        return { result: "amount_mismatch" };
+      }
+
+      // f. Khớp tiền: tiền đã thực sự về tài khoản nên LUÔN ghi nhận payment success, kể cả khi
+      // thiếu hàng. deductStockForOrder ném INSUFFICIENT_STOCK trước khi trừ dòng nào, nên bắt lỗi
+      // đó ở đây là đủ (không có gì cần rollback).
       if (payment) {
         await paymentModel.updateStatus(
           payment.id,
@@ -122,11 +124,29 @@ async function handleSepayWebhook(req, res, next) {
         );
       }
 
-      const orderItems = await orderItemModel.findByOrderId(order.id);
-      for (const item of orderItems) {
-        await bookModel.decreaseStock(item.book_id, item.quantity, conn);
+      const orderItems = await orderItemModel.findByOrderId(order.id, conn);
+      try {
+        await bookModel.deductStockForOrder(orderItems, conn);
+      } catch (stockErr) {
+        if (stockErr.errorCode !== "INSUFFICIENT_STOCK") throw stockErr;
+
+        const missing = stockErr.shortages.map((s) => `"${s.title}" (còn ${s.available}/${s.required})`).join(", ");
+        await orderStatusHistoryModel.create(
+          {
+            order_id: order.id,
+            status: "pending",
+            changed_by: "system",
+            note: `Đã nhận đủ tiền nhưng thiếu hàng: ${missing}`.slice(0, 255),
+          },
+          conn,
+        );
+        console.warn(
+          `[SePay webhook] Đơn ${orderCode} đã nhận đủ tiền nhưng thiếu hàng (${missing}) — giữ pending chờ admin xử lý.`,
+        );
+        return { result: "insufficient_stock" };
       }
 
+      await orderModel.updateStatus(order.id, "paid", conn);
       await orderStatusHistoryModel.create(
         {
           order_id: order.id,
@@ -137,20 +157,24 @@ async function handleSepayWebhook(req, res, next) {
         conn,
       );
 
-      await conn.commit();
-    } catch (err) {
-      await conn.rollback();
-      throw err;
-    } finally {
-      conn.release();
+      return { result: "paid", order };
+    });
+
+    if (outcome.result !== "paid") {
+      const messages = {
+        not_pending: "Đơn hàng không ở trạng thái chờ thanh toán",
+        already_recorded: "Thanh toán đã được ghi nhận trước đó",
+        amount_mismatch: "Số tiền chuyển khoản không khớp, cần đối chiếu thủ công",
+        insufficient_stock: "Đã ghi nhận thanh toán, đơn chờ bổ sung hàng",
+      };
+      return success(res, { message: messages[outcome.result] });
     }
 
-    // g. Báo realtime cho đúng khách hàng sở hữu đơn (mục 7) — trang OrderStatus.vue nếu đang mở
-    // sẽ tự đổi giao diện ngay, không cần reload hay polling lại API.
+    // g. Báo realtime cho đúng khách hàng sở hữu đơn (mục 7), chỉ sau khi đã commit
     const io = req.app.get("io");
-    emitToUser(io, order.user_id, "order:paid", {
-      order_id: order.id,
-      order_code: order.order_code,
+    emitToUser(io, outcome.order.user_id, "order:paid", {
+      order_id: outcome.order.id,
+      order_code: outcome.order.order_code,
       status: "paid",
     });
 

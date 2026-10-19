@@ -3,7 +3,7 @@
 // xem lại đơn cũ bất kỳ lúc nào (từ OrderList.vue). Lắng nghe socket 'order:paid' và
 // 'order:status_updated' (mục 7 trong spec) để cập nhật giao diện NGAY LẬP TỨC khi admin đổi trạng
 // thái hoặc webhook xác nhận thanh toán, không cần reload hay polling.
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { useOrderStore } from '../../stores/order.store';
 import orderService from '../../services/order.service';
@@ -21,6 +21,9 @@ const justUpdated = ref(false); // bật hiệu ứng nhấp nháy nhẹ trong 2
 const cancelling = ref(false);
 const cancelError = ref('');
 const showCancelConfirm = ref(false);
+
+// Webhook đã ghi nhận đủ tiền nhưng đơn còn pending vì thiếu hàng -> khách không tự hủy được nữa
+const paymentReceived = computed(() => orderStore.currentOrder?.payment?.status === 'success');
 
 async function loadOrder() {
   loading.value = true;
@@ -149,6 +152,12 @@ onUnmounted(() => {
         <p class="text-left text-[15px]"><strong>Nội dung chuyển khoản:</strong> {{ orderStore.currentOrder.payment_info.transfer_content }}</p>
         <p class="text-left text-[15px]"><strong>Số tiền:</strong> {{ formatPrice(orderStore.currentOrder.payment_info.amount) }}</p>
       </div>
+      <p
+        v-if="orderStore.currentOrder.status === 'pending' && paymentReceived"
+        class="mt-4 rounded-lg bg-[#FEF3C7] p-3 text-[15px] text-warning"
+      >
+        Cửa hàng đã nhận thanh toán, đơn đang chờ bổ sung hàng. Chúng tôi sẽ liên hệ với bạn sớm.
+      </p>
 
       <h3 class="mt-5">Lịch sử trạng thái</h3>
       <ul class="mt-2 flex flex-col gap-2">
@@ -162,7 +171,7 @@ onUnmounted(() => {
       <p v-if="cancelError" class="mt-3 text-sm text-danger">{{ cancelError }}</p>
       <div class="mt-5 flex items-center gap-4">
         <button
-          v-if="orderStore.currentOrder.status === 'pending'"
+          v-if="orderStore.currentOrder.status === 'pending' && !paymentReceived"
           type="button"
           class="min-h-[44px] rounded-lg border border-danger px-4 py-2 text-[15px] text-danger hover:bg-background focus:outline-none focus-visible:ring-2 focus-visible:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
           :disabled="cancelling"

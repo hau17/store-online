@@ -1,4 +1,3 @@
-const pool = require('../config/db');
 const env = require('../config/env');
 const cartItemModel = require('../models/cartItem.model');
 const orderModel = require('../models/order.model');
@@ -8,21 +7,10 @@ const paymentModel = require('../models/payment.model');
 const bookModel = require('../models/book.model');
 const generateOrderCode = require('../utils/generateOrderCode');
 const generateVietQrUrl = require('../utils/generateVietQrUrl');
+const { withTransaction, retryOnDuplicateCode } = require('../utils/transaction');
+const { getNextStatuses, isConfirmTransition, isRestockTransition } = require('../utils/orderStatusFlow');
 const { emitToUser } = require('../sockets/orderSocket');
 const { success, error } = require('../utils/response');
-
-// Business rule #6: trạng thái đơn hàng chỉ đi 1 chiều, không nhảy cóc/quay lui (trừ cancelled).
-// Key = trạng thái hiện tại, value = mảng trạng thái được phép chuyển tới. Dùng map thay vì
-// if-else lồng nhau để thêm/sửa luồng chuyển trạng thái sau này chỉ cần sửa đúng 1 chỗ.
-const VALID_TRANSITIONS = {
-  pending: ['paid', 'cancelled'],
-  paid: ['processing', 'cancelled'],
-  processing: ['shipping'],
-  shipping: ['completed', 'delivery_failed'],
-  completed: [],
-  cancelled: [],
-  delivery_failed: [],
-};
 
 function validateShippingInput({ shipping_name, shipping_phone, shipping_address }) {
   if (!shipping_name || !shipping_name.trim()) return 'Vui lòng nhập tên người nhận';
@@ -33,12 +21,19 @@ function validateShippingInput({ shipping_name, shipping_phone, shipping_address
   return null;
 }
 
-// payment_info chỉ có ý nghĩa khi bank_transfer VÀ đơn còn đang "pending" (đã paid/cancelled thì
-// không cần hiển thị QR nữa) — build lại được từ chính dữ liệu đơn hàng (order_code, total_amount)
-// + cấu hình VietQR trong .env, nên dùng chung được cho cả response lúc tạo đơn (createOrder) lẫn
-// lúc xem lại đơn sau này (getOrderById, kể cả sau khi F5 trang).
+function httpError(statusCode, errorCode, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  err.errorCode = errorCode;
+  return err;
+}
+
+// payment_info chỉ có ý nghĩa khi bank_transfer, đơn còn "pending" VÀ chưa nhận tiền — nếu webhook
+// đã ghi nhận tiền (payment success, đơn còn pending vì thiếu hàng) thì ẩn QR để khách không chuyển
+// lần hai. Build lại được từ dữ liệu đơn + cấu hình VietQR nên dùng chung cho createOrder/getOrderById.
 function buildPaymentInfo(order) {
   if (order.payment_method !== 'bank_transfer' || order.status !== 'pending') return undefined;
+  if (order.payment?.status === 'success') return undefined;
   return {
     bank_account: env.VIETQR_ACCOUNT_NUMBER,
     bank_bin: env.VIETQR_BANK_BIN,
@@ -51,14 +46,13 @@ function buildPaymentInfo(order) {
 
 function assertCanViewOrder(req, order) {
   if (req.user.role !== 'admin' && order.user_id !== req.user.id) {
-    const err = new Error('Bạn không có quyền xem đơn hàng này');
-    err.statusCode = 403;
-    err.errorCode = 'FORBIDDEN';
-    throw err;
+    throw httpError(403, 'FORBIDDEN', 'Bạn không có quyền xem đơn hàng này');
   }
 }
 
-// POST /api/orders — checkout, ĐÚNG 9 BƯỚC transaction trong spec mục 6.7
+// POST /api/orders — checkout (spec mục 6.7). Toàn bộ các bước a-i cùng thành công hoặc cùng rollback
+// (business rule #4): không để giỏ bị xóa mà đơn không được tạo, hay đơn thiếu order_items/payments.
+// Trùng order_code (2 request đồng thời) -> chạy lại cả transaction, tối đa 3 lần.
 async function createOrder(req, res, next) {
   try {
     const { shipping_name, shipping_phone, shipping_address, payment_method, note } = req.body;
@@ -68,97 +62,84 @@ async function createOrder(req, res, next) {
       return error(res, { message: validationError, errorCode: 'VALIDATION_ERROR', statusCode: 400 });
     }
 
-    const method = payment_method === 'cod' ? 'cod' : 'bank_transfer'; // mặc định bank_transfer đúng spec
+    const method = payment_method === 'cod' ? 'cod' : 'bank_transfer';
 
-    let orderId;
-    let orderCode;
-    let totalAmount;
+    const { orderId, orderCode, totalAmount } = await retryOnDuplicateCode(
+      () =>
+        withTransaction(async (conn) => {
+          // a. Giỏ hàng đọc bằng connection của transaction
+          const cartItems = await cartItemModel.findByUserId(req.user.id, conn);
+          if (cartItems.length === 0) throw httpError(400, 'CART_EMPTY', 'Giỏ hàng đang trống');
 
-    // Toàn bộ 9 bước a-i dưới đây PHẢI cùng thành công hoặc cùng thất bại (business rule #4) —
-    // đây là luồng rủi ro nhất trong toàn hệ thống. Nếu lỗi giữa chừng mà không rollback sạch,
-    // có thể xảy ra: giỏ hàng bị xóa nhưng đơn không được tạo (khách mất trắng giỏ hàng vô cớ),
-    // hoặc đơn được tạo nhưng thiếu order_items/payments (đơn "mồ côi" không thể xử lý tiếp).
-    const conn = await pool.getConnection();
-    try {
-      await conn.beginTransaction();
+          // b. Chỉ KIỂM TRA tồn kho, chưa trừ — trừ thật khi đơn được xác nhận (mục 6.7.1)
+          for (const item of cartItems) {
+            if (item.quantity > item.stock_quantity) {
+              throw httpError(
+                400,
+                'OUT_OF_STOCK',
+                `Sách "${item.title}" chỉ còn ${item.stock_quantity} cuốn, không đủ số lượng trong giỏ hàng (${item.quantity})`
+              );
+            }
+          }
 
-      // a. Lấy giỏ hàng của user — đọc bằng chính connection của transaction này
-      const cartItems = await cartItemModel.findByUserId(req.user.id, conn);
-      if (cartItems.length === 0) {
-        const err = new Error('Giỏ hàng đang trống');
-        err.statusCode = 400;
-        err.errorCode = 'CART_EMPTY';
-        throw err;
-      }
+          // c. Tổng tiền
+          const total = cartItems.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0);
 
-      // b. Kiểm tra tồn kho từng sách còn đủ không so với số lượng trong giỏ
-      for (const item of cartItems) {
-        if (item.quantity > item.stock_quantity) {
-          const err = new Error(
-            `Sách "${item.title}" chỉ còn ${item.stock_quantity} cuốn, không đủ số lượng trong giỏ hàng (${item.quantity})`
+          // d. Mã đơn
+          const code = await generateOrderCode(conn);
+
+          // e. Đơn hàng (status mặc định 'pending')
+          const id = await orderModel.create(
+            {
+              order_code: code,
+              user_id: req.user.id,
+              total_amount: total,
+              payment_method: method,
+              shipping_name: shipping_name.trim(),
+              shipping_phone: shipping_phone.trim(),
+              shipping_address: shipping_address.trim(),
+              note,
+            },
+            conn
           );
-          err.statusCode = 400;
-          err.errorCode = 'OUT_OF_STOCK';
-          throw err;
-        }
+
+          // f. Chi tiết đơn — snapshot book_title + price (business rule #2)
+          await orderItemModel.createMany(
+            id,
+            cartItems.map((item) => ({
+              book_id: item.book_id,
+              book_title: item.title,
+              quantity: item.quantity,
+              price: item.price,
+            })),
+            conn
+          );
+
+          // g. Lịch sử trạng thái đầu tiên
+          await orderStatusHistoryModel.create(
+            { order_id: id, status: 'pending', changed_by: 'system', note: 'Đơn hàng vừa được tạo' },
+            conn
+          );
+
+          // h. Xóa giỏ — sau mọi bước ghi ở trên để rollback thì giỏ vẫn còn nguyên
+          await cartItemModel.clearCart(req.user.id, conn);
+
+          // i. Chuyển khoản: tạo payment chờ thanh toán
+          if (method === 'bank_transfer') {
+            await paymentModel.create(
+              { order_id: id, amount: total, gateway: 'sepay', transfer_content: code },
+              conn
+            );
+          }
+
+          return { orderId: id, orderCode: code, totalAmount: total };
+        }),
+      {
+        uniqueKey: 'order_code',
+        errorCode: 'ORDER_CODE_CONFLICT',
+        message: 'Hệ thống đang bận, vui lòng thử lại',
       }
-
-      // c. Tính tổng tiền
-      totalAmount = cartItems.reduce((sum, item) => sum + Number(item.price) * item.quantity, 0);
-
-      // d. Sinh order_code duy nhất (xem giải thích race condition trong generateImportCode.js)
-      orderCode = await generateOrderCode(conn);
-
-      // e. Insert đơn hàng — status mặc định 'pending' theo default của cột trong DB
-      orderId = await orderModel.create(
-        {
-          order_code: orderCode,
-          user_id: req.user.id,
-          total_amount: totalAmount,
-          payment_method: method,
-          shipping_name: shipping_name.trim(),
-          shipping_phone: shipping_phone.trim(),
-          shipping_address: shipping_address.trim(),
-          note,
-        },
-        conn
-      );
-
-      // f. Insert chi tiết đơn hàng — snapshot book_title + price NGAY LÚC NÀY (business rule #2),
-      // không lưu tham chiếu để join giá hiện tại của books về sau (giá sách có thể đổi sau này).
-      const orderItemsData = cartItems.map((item) => ({
-        book_id: item.book_id,
-        book_title: item.title,
-        quantity: item.quantity,
-        price: item.price,
-      }));
-      await orderItemModel.createMany(orderId, orderItemsData, conn);
-
-      // g. Ghi lịch sử trạng thái đầu tiên
-      await orderStatusHistoryModel.create(
-        { order_id: orderId, status: 'pending', changed_by: 'system', note: 'Đơn hàng vừa được tạo' },
-        conn
-      );
-
-      // h. Xóa giỏ hàng — chỉ xóa SAU khi mọi bước ghi trên đã qua, để nếu có bước nào lỗi thì
-      // giỏ hàng vẫn còn nguyên sau rollback (khách không bị mất giỏ oan uổng).
-      await cartItemModel.clearCart(req.user.id, conn);
-
-      // i. Nếu thanh toán chuyển khoản: tạo dòng payment ban đầu (status 'pending' theo default DB)
-      if (method === 'bank_transfer') {
-        await paymentModel.create(
-          { order_id: orderId, amount: totalAmount, gateway: 'sepay', transfer_content: orderCode },
-          conn
-        );
-      }
-
-      await conn.commit();
-    } catch (err) {
-      await conn.rollback();
-      throw err;
-    } finally {
-      conn.release();
-    }
+    );
 
     return success(res, {
       message: 'Tạo đơn hàng thành công',
@@ -243,80 +224,73 @@ async function getOrderStatus(req, res, next) {
   }
 }
 
-// PUT /api/orders/:id/status — Admin only
+// PUT /api/orders/:id/status — Admin only (spec mục 6.7, 6.7.1).
+// Mọi bước chuyển chạy trong 1 transaction có khóa dòng đơn hàng: kiểm tra bước chuyển hợp lệ theo
+// payment_method, trừ kho khi xác nhận đơn, hoàn kho khi đơn đã trừ kho bị hủy / giao không thành
+// công, đồng bộ payments, ghi lịch sử. Socket chỉ phát sau khi commit.
 async function updateOrderStatus(req, res, next) {
   try {
-    const { status: newStatus, note } = req.body;
+    const { status: newStatus } = req.body;
+    const note = typeof req.body.note === 'string' ? req.body.note.trim() : '';
 
-    const order = await orderModel.findById(req.params.id);
-    if (!order) {
-      return error(res, { message: 'Không tìm thấy đơn hàng', errorCode: 'ORDER_NOT_FOUND', statusCode: 404 });
-    }
+    const order = await withTransaction(async (conn) => {
+      const current = await orderModel.findByIdForUpdate(req.params.id, conn);
+      if (!current) throw httpError(404, 'ORDER_NOT_FOUND', 'Không tìm thấy đơn hàng');
 
-    const allowedNext = VALID_TRANSITIONS[order.status] || [];
-    if (!allowedNext.includes(newStatus)) {
-      return error(res, {
-        message: `Không thể chuyển trạng thái từ "${order.status}" sang "${newStatus}". Trạng thái hợp lệ tiếp theo: ${
-          allowedNext.length ? allowedNext.join(', ') : '(không có, đây là trạng thái kết thúc)'
-        }`,
-        errorCode: 'INVALID_STATUS_TRANSITION',
-        statusCode: 400,
-      });
-    }
-
-    if (newStatus === 'delivery_failed') {
-      // Lý do bắt buộc phải có — đây là thông tin quan trọng cần lưu lại khi hoàn kho, không được
-      // để trống (business rule liên quan tới hoàn kho, mục 6.7).
-      if (!note || !note.trim()) {
-        return error(res, {
-          message: 'Vui lòng nhập lý do khi chuyển đơn sang "Giao không thành công"',
-          errorCode: 'VALIDATION_ERROR',
-          statusCode: 400,
-        });
-      }
-
-      // delivery_failed là trường hợp ĐẶC BIỆT DUY NHẤT ngoài webhook được phép hoàn lại
-      // stock_quantity (business rule #3) — phải bọc trong TRANSACTION RIÊNG (business rule #4)
-      // vì vừa đổi status đơn vừa cộng tồn kho nhiều dòng sách cùng lúc: nếu lỗi giữa chừng mà
-      // không rollback sạch, có thể xảy ra tồn kho được hoàn nhưng đơn không đổi trạng thái
-      // (hoặc ngược lại), gây lệch số liệu tồn kho thật không thể tự sửa lại.
-      const conn = await pool.getConnection();
-      try {
-        await conn.beginTransaction();
-
-        // a. Đổi trạng thái đơn
-        await orderModel.updateStatus(req.params.id, 'delivery_failed', conn);
-
-        // b + c. Lấy từng dòng sách trong đơn, hoàn lại đúng số lượng đã trừ lúc chuyển "paid"
-        const orderItems = await orderItemModel.findByOrderId(req.params.id);
-        for (const item of orderItems) {
-          await bookModel.increaseStock(item.book_id, item.quantity, conn);
-        }
-
-        // d + e. Ghi lịch sử kèm lý do bắt buộc
-        await orderStatusHistoryModel.create(
-          { order_id: req.params.id, status: 'delivery_failed', changed_by: 'admin', note },
-          conn
+      const allowedNext = getNextStatuses(current.payment_method, current.status);
+      if (!allowedNext.includes(newStatus)) {
+        throw httpError(
+          400,
+          'INVALID_STATUS_TRANSITION',
+          `Không thể chuyển trạng thái từ "${current.status}" sang "${newStatus}". Trạng thái hợp lệ tiếp theo: ${
+            allowedNext.length ? allowedNext.join(', ') : '(không có, đây là trạng thái kết thúc)'
+          }`
         );
-
-        await conn.commit();
-      } catch (err) {
-        await conn.rollback();
-        throw err;
-      } finally {
-        conn.release();
       }
-    } else {
-      // Các trường hợp chuyển trạng thái KHÁC delivery_failed: giữ nguyên logic cũ — chỉ update
-      // status + insert history, KHÔNG đụng tới stock_quantity.
-      await orderModel.updateStatus(req.params.id, newStatus);
-      await orderStatusHistoryModel.create({ order_id: req.params.id, status: newStatus, changed_by: 'admin', note });
-    }
 
-    // f. Báo realtime cho đúng khách hàng sở hữu đơn (mục 7) — trang OrderStatus.vue nếu đang mở
-    // sẽ tự cập nhật giao diện ngay bằng payload này, không cần reload hay polling lại API.
+      const payment = await paymentModel.findByOrderId(current.id, conn);
+      const isConfirm = isConfirmTransition(current.status, newStatus);
+      const isRestock = isRestockTransition(current.status, newStatus);
+      const isCancelPaidPending =
+        current.status === 'pending' && newStatus === 'cancelled' && payment?.status === 'success';
+
+      if (!note) {
+        if (isRestock) {
+          throw httpError(400, 'VALIDATION_ERROR', 'Vui lòng nhập lý do khi hủy đơn đã xác nhận hoặc giao không thành công');
+        }
+        if (newStatus === 'paid') {
+          throw httpError(400, 'VALIDATION_ERROR', 'Vui lòng ghi chú kết quả đối soát (vd mã giao dịch) khi xác nhận thanh toán thủ công');
+        }
+        if (isCancelPaidPending) {
+          throw httpError(400, 'VALIDATION_ERROR', 'Đơn đã nhận tiền — vui lòng ghi chú việc hoàn tiền cho khách khi hủy');
+        }
+      }
+
+      await orderModel.updateStatus(current.id, newStatus, conn);
+
+      if (isConfirm || isRestock) {
+        const items = await orderItemModel.findByOrderId(current.id, conn);
+        if (isConfirm) await bookModel.deductStockForOrder(items, conn);
+        else await bookModel.restoreStockForOrder(items, conn);
+      }
+
+      if (newStatus === 'paid' && payment && payment.status !== 'success') {
+        await paymentModel.updateStatus(payment.id, { status: 'success', paid_at: new Date() }, conn);
+      }
+      if (current.status === 'pending' && newStatus === 'cancelled') {
+        await paymentModel.cancelOpenByOrderId(current.id, conn);
+      }
+
+      await orderStatusHistoryModel.create(
+        { order_id: current.id, status: newStatus, changed_by: 'admin', note: note || null },
+        conn
+      );
+
+      return current;
+    });
+
     const io = req.app.get('io');
-    emitToUser(io, order.user_id, 'order:status_updated', { order_id: Number(req.params.id), status: newStatus });
+    emitToUser(io, order.user_id, 'order:status_updated', { order_id: order.id, status: newStatus });
 
     return success(res, { message: 'Cập nhật trạng thái đơn hàng thành công', data: { status: newStatus } });
   } catch (err) {
@@ -324,32 +298,45 @@ async function updateOrderStatus(req, res, next) {
   }
 }
 
-// DELETE /api/orders/:id — khách tự hủy đơn, CHỈ khi đang ở trạng thái pending
+// DELETE /api/orders/:id — khách tự hủy đơn của mình khi còn "pending" và chưa nhận tiền.
+// (Admin hủy đơn qua PUT /api/orders/:id/status để đi đúng luồng hoàn kho/ghi chú.)
 async function cancelOrder(req, res, next) {
   try {
-    const order = await orderModel.findById(req.params.id);
-    if (!order) {
-      return error(res, { message: 'Không tìm thấy đơn hàng', errorCode: 'ORDER_NOT_FOUND', statusCode: 404 });
-    }
-    assertCanViewOrder(req, order);
+    const order = await withTransaction(async (conn) => {
+      const current = await orderModel.findByIdForUpdate(req.params.id, conn);
+      if (!current) throw httpError(404, 'ORDER_NOT_FOUND', 'Không tìm thấy đơn hàng');
+      assertCanViewOrder(req, current);
 
-    if (order.status !== 'pending') {
-      return error(res, {
-        message: 'Chỉ có thể hủy đơn hàng khi đang ở trạng thái chờ xử lý',
-        errorCode: 'CANNOT_CANCEL',
-        statusCode: 400,
-      });
-    }
+      if (current.status !== 'pending') {
+        throw httpError(400, 'CANNOT_CANCEL', 'Chỉ có thể hủy đơn hàng khi đang ở trạng thái chờ xử lý');
+      }
 
-    await orderModel.updateStatus(req.params.id, 'cancelled');
-    // changed_by chỉ nhận 'system'/'admin' theo ENUM trong schema (không có 'customer') — khách tự
-    // hủy đơn của chính mình được ghi nhận là 'system', admin hủy hộ thì ghi 'admin'.
-    await orderStatusHistoryModel.create({
-      order_id: req.params.id,
-      status: 'cancelled',
-      changed_by: req.user.role === 'admin' ? 'admin' : 'system',
-      note: 'Khách hàng tự hủy đơn',
+      const payment = await paymentModel.findByOrderId(current.id, conn);
+      if (payment?.status === 'success') {
+        throw httpError(
+          400,
+          'PAYMENT_RECEIVED',
+          'Đơn đã nhận thanh toán, vui lòng liên hệ cửa hàng để được hỗ trợ hoàn tiền'
+        );
+      }
+
+      await orderModel.updateStatus(current.id, 'cancelled', conn);
+      await paymentModel.cancelOpenByOrderId(current.id, conn);
+      await orderStatusHistoryModel.create(
+        {
+          order_id: current.id,
+          status: 'cancelled',
+          changed_by: req.user.role === 'admin' ? 'admin' : 'customer',
+          note: req.user.role === 'admin' ? 'Admin hủy đơn' : 'Khách hàng tự hủy đơn',
+        },
+        conn
+      );
+
+      return current;
     });
+
+    const io = req.app.get('io');
+    emitToUser(io, order.user_id, 'order:status_updated', { order_id: order.id, status: 'cancelled' });
 
     return success(res, { message: 'Hủy đơn hàng thành công' });
   } catch (err) {

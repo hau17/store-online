@@ -105,7 +105,7 @@ onMounted(fetchBook);
         <p class="mt-1 text-[15px]"><strong>Tồn kho:</strong> {{ book.stock_quantity }}</p>
         <p class="mt-3 whitespace-pre-line text-[15px] text-text-secondary">{{ book.description || 'Chưa có mô tả' }}</p>
 
-        <div class="mt-4 flex items-center gap-3">
+        <div v-if="!authStore.isAdmin" class="mt-4 flex items-center gap-3">
           <label for="quantity" class="sr-only">Số lượng</label>
           <input
             id="quantity"

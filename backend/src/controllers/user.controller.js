@@ -38,8 +38,7 @@ async function getCustomerById(req, res, next) {
   }
 }
 
-// PUT /api/users/:id/lock — admin. reason (optional): chỉ dùng để log lại lý do, DB chưa có cột
-// riêng lưu lý do khóa nên không bắt buộc phải lưu — log console là đủ theo yêu cầu.
+// PUT /api/users/:id/lock — admin. reason (không bắt buộc) lưu vào users.locked_reason (tối đa 255 ký tự).
 async function lockCustomer(req, res, next) {
   try {
     const role = await userModel.findRoleById(req.params.id);
@@ -59,11 +58,8 @@ async function lockCustomer(req, res, next) {
       });
     }
 
-    if (req.body?.reason) {
-      console.log(`[Khóa tài khoản] user_id=${req.params.id}, lý do: ${req.body.reason}`);
-    }
-
-    await userModel.lockUser(req.params.id);
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim().slice(0, 255) : '';
+    await userModel.lockUser(req.params.id, reason || null);
     return success(res, { message: 'Khóa tài khoản thành công' });
   } catch (err) {
     next(err);

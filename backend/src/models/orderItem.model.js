@@ -6,8 +6,9 @@ async function findAll() {
 }
 
 // Lấy toàn bộ order_items của 1 đơn hàng (dùng để hiển thị chi tiết đơn)
-async function findByOrderId(orderId) {
-  const [rows] = await pool.execute('SELECT * FROM order_items WHERE order_id = ?', [orderId]);
+// conn (tùy chọn): đọc trong transaction khi cần trừ/hoàn kho theo đúng các dòng của đơn.
+async function findByOrderId(orderId, conn = pool) {
+  const [rows] = await conn.execute('SELECT * FROM order_items WHERE order_id = ?', [orderId]);
   return rows;
 }
 
